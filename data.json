@@ -1,0 +1,40 @@
+{
+  "+923358150949": {
+    "phone": "+923358150949",
+    "password_hash": "$2a$10$jTUbXV9g9RxyNzCbdNprCuFmMACcgfmR/L.E4e9HEQQPhiETVC/hS",
+    "name": "Abshar User",
+    "cnic": "1111-1212329-7",
+    "data": {
+      "englishName": "KHALID KHAIR BADSHAH",
+      "arabicName": "خالد خير بادشاه",
+      "idNumber": "2531056527",
+      "expiryDate": "٢٠٢٧/٠٧/٠٥",
+      "dob": "١٩٩٦/٠١/٠١",
+      "pob": "باكستان",
+      "nationality": "باكستان",
+      "religion": "الاسلام",
+      "profession": "سائق شاحنة ثقيلة",
+      "employerId": "٧٠٢٨٣٤٣٧٦٧",
+      "placeOfIssue": "موقع بوابة الوزارة الالكترونية",
+      "workPlace": "الرياض",
+      "sponsorName": "نقليات نواف عبيد راشد الشمري",
+      "family": [
+        "Ali Raza",
+        "Sana Khan"
+      ],
+      "services": [
+        "EWS",
+        "Ziarat"
+      ],
+      "workers": [
+        "Worker 1",
+        "Worker 2"
+      ],
+      "other": [
+        "Nic",
+        "B-Form",
+        "Passport"
+      ]
+    }
+  }
+}
