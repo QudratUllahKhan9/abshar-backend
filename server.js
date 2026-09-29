@@ -452,7 +452,7 @@ app.post('/api/login', async (req, res) => {
       return fail(
         res,
         401,
-        'Mobile number ya password galat hai'
+        'Invalid mobile number or password'
       );
     }
 
