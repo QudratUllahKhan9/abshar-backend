@@ -563,13 +563,15 @@ app.post(
         otp
       );
 
-      if (!PHONE_RE.test(phone)) {
-        return fail(
-          res,
-          400,
-          'Invalid phone number'
-        );
-      }
+     const phoneDigits = String(phone || '').replace(/\D/g, '');
+
+if (phoneDigits.length < 6) {
+  return fail(
+    res,
+    400,
+    'Invalid mobile number'
+  );
+}
 
       if (!/^\d{4}$/.test(otp)) {
         return fail(
