@@ -13,86 +13,227 @@ const app = express();
    DNS
 ===================================================== */
 
-dns.setServers(['1.1.1.1', '8.8.8.8']);
+dns.setServers([
+  '1.1.1.1',
+  '8.8.8.8',
+]);
 
 /* =====================================================
    EXPRESS
 ===================================================== */
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(
+  express.json({
+    limit: '10mb',
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: '10mb',
+  })
+);
 
 /* =====================================================
    CONFIG
 ===================================================== */
 
-const PORT = process.env.PORT || 5000;
+const PORT =
+  process.env.PORT || 5000;
 
 const JWT_SECRET =
-  process.env.JWT_SECRET || 'change_this_to_a_real_secret';
+  process.env.JWT_SECRET ||
+  'change_this_to_a_real_secret';
 
-const OTP_TTL = parseInt(
-  process.env.OTP_TTL_SECONDS || '300',
-  10
-);
+const OTP_TTL =
+  parseInt(
+    process.env.OTP_TTL_SECONDS || '300',
+    10
+  );
 
-const MAX_ATTEMPTS = parseInt(
-  process.env.OTP_ATTEMPTS_MAX || '3',
-  10
-);
+const MAX_ATTEMPTS =
+  parseInt(
+    process.env.OTP_ATTEMPTS_MAX || '3',
+    10
+  );
 
-const COOLDOWN_MS = parseInt(
-  process.env.OTP_RESEND_COOLDOWN_MS || '60000',
-  10
-);
+const COOLDOWN_MS =
+  parseInt(
+    process.env.OTP_RESEND_COOLDOWN_MS || '60000',
+    10
+  );
 
 /* =====================================================
-   DB MIDDLEWARE
-   Har request se pehle MongoDB connection ensure hota hai.
-   Local aur Vercel dono par same behaviour.
+   MONGODB CONNECTION CACHE
+   Vercel / Serverless safe
 ===================================================== */
 
-app.use((req, res, next) => {
+let cached =
+  global.__MONGO_CACHE__;
 
-  connectDB()
+if (!cached) {
+  cached =
+    global.__MONGO_CACHE__ = {
+      conn: null,
+      promise: null,
+    };
+}
 
-    .then(() => next())
+/* =====================================================
+   CONNECT DATABASE
+===================================================== */
 
-    .catch((err) => {
+async function connectDB() {
+
+  /* Already connected */
+  if (
+    cached.conn &&
+    mongoose.connection.readyState === 1
+  ) {
+    return cached.conn;
+  }
+
+  /* Connection currently in progress */
+  if (cached.promise) {
+    return cached.promise;
+  }
+
+  /* MONGO_URI check */
+  if (!process.env.MONGO_URI) {
+
+    throw new Error(
+      'MONGO_URI environment variable is missing'
+    );
+  }
+
+  console.log(
+    '[DB] Connecting to MongoDB...'
+  );
+
+  cached.promise =
+    mongoose
+      .connect(
+        process.env.MONGO_URI,
+        {
+          serverSelectionTimeoutMS: 10000,
+          connectTimeoutMS: 10000,
+          socketTimeoutMS: 45000,
+        }
+      )
+      .then(
+        (mongooseInstance) => {
+
+          cached.conn =
+            mongooseInstance.connection;
+
+          console.log(
+            '[OK] MongoDB connected'
+          );
+
+          console.log(
+            '[DB]',
+            cached.conn.name
+          );
+
+          return cached.conn;
+        }
+      )
+      .catch(
+        (error) => {
+
+          console.error(
+            '[DB ERROR]',
+            error.message
+          );
+
+          cached.promise = null;
+          cached.conn = null;
+
+          throw error;
+        }
+      );
+
+  return cached.promise;
+}
+
+/* =====================================================
+   DATABASE MIDDLEWARE
+===================================================== */
+
+app.use(
+  async (req, res, next) => {
+
+    try {
+
+      await connectDB();
+
+      next();
+
+    } catch (err) {
 
       console.error(
         '[DB ERROR] Connection failed:',
         err.message
       );
 
-      res.status(500).json({
+      return res.status(500).json({
         success: false,
-        message: 'Database connection failed',
+        message:
+          'Database connection failed',
+        error:
+          process.env.NODE_ENV ===
+          'production'
+            ? undefined
+            : err.message,
       });
-    });
-});
+    }
+  }
+);
 
 /* =====================================================
    PHONE NORMALIZE
 ===================================================== */
 
 function normalizePhone(p) {
-  let s = String(p || '')
-    .trim()
-    .replace(/[\s-]/g, '');
 
-  if (!s) return s;
+  let s =
+    String(p || '')
+      .trim()
+      .replace(
+        /[\s-]/g,
+        ''
+      );
 
-  if (s.startsWith('+')) return s;
-
-  if (/^0\d{9,10}$/.test(s)) {
-    return '+92' + s.slice(1);
+  if (!s) {
+    return s;
   }
 
-  if (/^92\d{9,10}$/.test(s)) {
+  /* Already international */
+  if (
+    s.startsWith('+')
+  ) {
+    return s;
+  }
+
+  /* Pakistan local number */
+  if (
+    /^0\d{9,10}$/.test(s)
+  ) {
+    return (
+      '+92' +
+      s.slice(1)
+    );
+  }
+
+  /* Pakistan without + */
+  if (
+    /^92\d{9,10}$/.test(s)
+  ) {
     return '+' + s;
   }
 
+  /* Other countries */
   return s;
 }
 
@@ -101,426 +242,705 @@ function normalizePhone(p) {
 ===================================================== */
 
 function getPhoneFormats(phone) {
-  const raw = String(phone || '')
-    .trim()
-    .replace(/[\s-]/g, '');
 
-  const normalized = normalizePhone(raw);
+  const raw =
+    String(phone || '')
+      .trim()
+      .replace(
+        /[\s-]/g,
+        ''
+      );
 
-  const formats = new Set();
+  const normalized =
+    normalizePhone(raw);
 
-  if (raw) formats.add(raw);
+  const formats =
+    new Set();
 
-  if (normalized) formats.add(normalized);
-
-  if (normalized.startsWith('+92')) {
-    formats.add('0' + normalized.slice(3));
+  if (raw) {
+    formats.add(raw);
   }
 
-  if (normalized.startsWith('+')) {
-    formats.add(normalized.slice(1));
+  if (normalized) {
+    formats.add(normalized);
   }
 
-  return [...formats];
+  /* Pakistan +92 to local 03xx */
+  if (
+    normalized.startsWith('+92')
+  ) {
+
+    formats.add(
+      '0' +
+      normalized.slice(3)
+    );
+  }
+
+  /* International without + */
+  if (
+    normalized.startsWith('+')
+  ) {
+
+    formats.add(
+      normalized.slice(1)
+    );
+  }
+
+  return [
+    ...formats,
+  ];
 }
 
 /* =====================================================
-   PHONE REGEX
+   PHONE VALIDATION
+   Any country allowed.
+   Minimum 6 digits.
 ===================================================== */
 
-const PHONE_RE = /^\+[1-9]\d{7,14}$/;
+function isValidMobileNumber(phone) {
+
+  const digits =
+    String(phone || '')
+      .replace(
+        /\D/g,
+        ''
+      );
+
+  return (
+    digits.length >= 6
+  );
+}
 
 /* =====================================================
    ERROR HELPER
 ===================================================== */
 
-function fail(res, code, message) {
-  return res.status(code).json({
-    success: false,
-    message,
-  });
+function fail(
+  res,
+  code,
+  message
+) {
+
+  return res
+    .status(code)
+    .json({
+      success: false,
+      message,
+    });
 }
 
 /* =====================================================
    HOME
 ===================================================== */
 
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Abshar API is running',
-  });
-});
+app.get(
+  '/',
+  (req, res) => {
+
+    res.json({
+      success: true,
+      message:
+        'Abshar API is running',
+    });
+  }
+);
 
 /* =====================================================
    HEALTH
 ===================================================== */
 
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Server is running',
-    mongodb: mongoose.connection.readyState === 1,
-  });
-});
+app.get(
+  '/api/health',
+  (req, res) => {
+
+    res.json({
+      success: true,
+      message:
+        'Server is running',
+
+      mongodb:
+        mongoose.connection
+          .readyState === 1,
+
+      database:
+        mongoose.connection.name ||
+        null,
+    });
+  }
+);
 
 /* =====================================================
    REGISTER
    COLLECTION: items
 ===================================================== */
 
-app.post('/api/register', async (req, res) => {
-  try {
-    const rawPhone = String(req.body.phone || '').trim();
+app.post(
+  '/api/register',
+  async (req, res) => {
 
-    const password = String(
-      req.body.password || ''
-    );
+    try {
 
-    console.log('\n');
-    console.log('========================================');
-    console.log('         📝 REGISTER REQUEST');
-    console.log('========================================');
-    console.log('📱 Phone:', rawPhone);
-    console.log('👤 Name:', req.body.name);
-    console.log('🪪 CNIC:', req.body.cnic || req.body.idNo);
-    console.log('🖼️ Image URL:', req.body.imageUrl);
-    console.log('========================================');
+      const rawPhone =
+        String(
+          req.body.phone || ''
+        ).trim();
 
-    if (!rawPhone) {
-      return fail(
-        res,
-        400,
-        'Mobile number required'
-      );
-    }
+      const password =
+        String(
+          req.body.password || ''
+        );
 
-    if (password.length < 6) {
-      return fail(
-        res,
-        400,
-        'Password kam se kam 6 characters ka rakho'
-      );
-    }
+      console.log('\n');
 
-    const phoneFormats = getPhoneFormats(rawPhone);
-
-    console.log('📱 Phone Formats:', phoneFormats);
-
-    const itemsCollection =
-      mongoose.connection.collection('items');
-
-    const existing =
-      await itemsCollection.findOne({
-        phone: {
-          $in: phoneFormats,
-        },
-      });
-
-    if (existing) {
       console.log(
-        '❌ REGISTER FAILED: Number already exists'
+        '========================================'
       );
 
-      return fail(
-        res,
-        409,
-        'Ye number already registered hai'
+      console.log(
+        '         📝 REGISTER REQUEST'
       );
-    }
 
-    /* ==========================================
-       NEW USER DATA
-    ========================================== */
+      console.log(
+        '========================================'
+      );
 
-    const newUser = {
-      name: String(
-        req.body.name || 'User'
-      ),
+      console.log(
+        '📱 Phone:',
+        rawPhone
+      );
 
-      idNo: String(
+      console.log(
+        '👤 Name:',
+        req.body.name
+      );
+
+      console.log(
+        '🪪 CNIC:',
         req.body.cnic ||
-        req.body.idNo ||
-        ''
-      ),
-
-      phone: rawPhone,
-
-      password: password,
-
-      userImageUrl: String(
-        req.body.imageUrl || ''
-      ),
-
-      userImagePublicId: '',
-
-      cardImageUrl: '',
-
-      cardImagePublicId: '',
-
-      createdAt: new Date(),
-
-      updatedAt: new Date(),
-    };
-
-    console.log('\n');
-    console.log('========== DATA SAVING TO MONGODB ==========');
-
-    console.log(
-      JSON.stringify(
-        {
-          ...newUser,
-          password: '********',
-        },
-        null,
-        2
-      )
-    );
-
-    console.log(
-      '============================================='
-    );
-
-    const result =
-      await itemsCollection.insertOne(
-        newUser
+          req.body.idNo
       );
-
-    console.log('✅ USER INSERTED');
-    console.log(
-      '🆔 MongoDB ID:',
-      result.insertedId.toString()
-    );
-
-    return res.json({
-      success: true,
-      message:
-        'Successfully registered! Ab login karo.',
-      userId: String(result.insertedId),
-    });
-
-  } catch (e) {
-    console.error(
-      '❌ REGISTER ERROR:',
-      e
-    );
-
-    return fail(
-      res,
-      500,
-      'Registration failed'
-    );
-  }
-});
-
-/* =====================================================
-   LOGIN
-===================================================== */
-
-app.post('/api/login', async (req, res) => {
-  try {
-    const rawPhone = String(
-      req.body.phone || ''
-    ).trim();
-
-    const password = String(
-      req.body.password || ''
-    );
-
-    console.log('\n');
-    console.log('========================================');
-    console.log('             🔐 LOGIN REQUEST');
-    console.log('========================================');
-
-    console.log(
-      '📱 Requested Phone:',
-      rawPhone
-    );
-
-    console.log(
-      '🔑 Password Received:',
-      password ? 'YES' : 'NO'
-    );
-
-    if (!rawPhone) {
-      return fail(
-        res,
-        400,
-        'Mobile number required'
-      );
-    }
-
-    if (!password) {
-      return fail(
-        res,
-        400,
-        'Password required'
-      );
-    }
-
-    const normalizedPhone =
-      normalizePhone(rawPhone);
-
-    const phoneFormats =
-      getPhoneFormats(rawPhone);
-
-    console.log(
-      '📱 Normalized Phone:',
-      normalizedPhone
-    );
-
-    console.log(
-      '📱 Phone Formats:',
-      phoneFormats
-    );
-
-    const itemsCollection =
-      mongoose.connection.collection('items');
-
-    const item =
-      await itemsCollection.findOne({
-        phone: {
-          $in: phoneFormats,
-        },
-
-        password: password,
-      });
-
-    /* ==========================================
-       SHOW MONGODB LOGIN DATA
-    ========================================== */
-
-    console.log('\n');
-    console.log(
-      '========== MONGODB LOGIN RESULT =========='
-    );
-
-    if (item) {
 
       console.log(
-        '✅ USER FOUND IN MONGODB'
+        '🖼️ Image URL:',
+        req.body.imageUrl
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      /* Mobile validation */
+
+      if (
+        !isValidMobileNumber(
+          rawPhone
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
+      }
+
+      /* Password validation */
+
+      if (
+        password.length < 6
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Password kam se kam 6 characters ka rakho'
+        );
+      }
+
+      const phoneFormats =
+        getPhoneFormats(
+          rawPhone
+        );
+
+      console.log(
+        '📱 Phone Formats:',
+        phoneFormats
+      );
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      const existing =
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
+
+      if (existing) {
+
+        console.log(
+          '❌ REGISTER FAILED: Number already exists'
+        );
+
+        return fail(
+          res,
+          409,
+          'Ye number already registered hai'
+        );
+      }
+
+      /* ==========================================
+         PASSWORD HASH
+      ========================================== */
+
+      const hashedPassword =
+        await bcrypt.hash(
+          password,
+          10
+        );
+
+      /* ==========================================
+         NEW USER
+      ========================================== */
+
+      const newUser = {
+
+        name:
+          String(
+            req.body.name ||
+              'User'
+          ),
+
+        idNo:
+          String(
+            req.body.cnic ||
+              req.body.idNo ||
+              ''
+          ),
+
+        phone:
+          normalizePhone(
+            rawPhone
+          ),
+
+        password:
+          hashedPassword,
+
+        userImageUrl:
+          String(
+            req.body.imageUrl ||
+              ''
+          ),
+
+        userImagePublicId:
+          '',
+
+        cardImageUrl:
+          '',
+
+        cardImagePublicId:
+          '',
+
+        createdAt:
+          new Date(),
+
+        updatedAt:
+          new Date(),
+      };
+
+      console.log('\n');
+
+      console.log(
+        '========== DATA SAVING TO MONGODB =========='
       );
 
       console.log(
         JSON.stringify(
           {
-            _id: item._id,
-            name: item.name,
-            idNo: item.idNo,
-            phone: item.phone,
-
-            userImageUrl:
-              item.userImageUrl,
-
-            userImagePublicId:
-              item.userImagePublicId,
-
-            cardImageUrl:
-              item.cardImageUrl,
-
-            cardImagePublicId:
-              item.cardImagePublicId,
-
-            createdAt:
-              item.createdAt,
-
-            updatedAt:
-              item.updatedAt,
+            ...newUser,
+            password:
+              '********',
           },
           null,
           2
         )
       );
 
-    } else {
+      console.log(
+        '============================================='
+      );
+
+      const result =
+        await itemsCollection.insertOne(
+          newUser
+        );
 
       console.log(
-        '❌ USER NOT FOUND IN MONGODB'
+        '✅ USER INSERTED'
       );
 
       console.log(
-        'Searched Phone Formats:',
+        '🆔 MongoDB ID:',
+        result.insertedId.toString()
+      );
+
+      return res.json({
+
+        success:
+          true,
+
+        message:
+          'Successfully registered! Ab login karo.',
+
+        userId:
+          String(
+            result.insertedId
+          ),
+      });
+
+    } catch (e) {
+
+      console.error(
+        '❌ REGISTER ERROR:',
+        e
+      );
+
+      return fail(
+        res,
+        500,
+        'Registration failed'
+      );
+    }
+  }
+);
+
+/* =====================================================
+   LOGIN
+===================================================== */
+
+app.post(
+  '/api/login',
+  async (req, res) => {
+
+    try {
+
+      const rawPhone =
+        String(
+          req.body.phone || ''
+        ).trim();
+
+      const password =
+        String(
+          req.body.password || ''
+        );
+
+      console.log('\n');
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '             🔐 LOGIN REQUEST'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '📱 Requested Phone:',
+        rawPhone
+      );
+
+      console.log(
+        '🔑 Password Received:',
+        password
+          ? 'YES'
+          : 'NO'
+      );
+
+      /* Mobile validation */
+
+      if (
+        !isValidMobileNumber(
+          rawPhone
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
+      }
+
+      /* Password validation */
+
+      if (!password) {
+
+        return fail(
+          res,
+          400,
+          'Password required'
+        );
+      }
+
+      const normalizedPhone =
+        normalizePhone(
+          rawPhone
+        );
+
+      const phoneFormats =
+        getPhoneFormats(
+          rawPhone
+        );
+
+      console.log(
+        '📱 Normalized Phone:',
+        normalizedPhone
+      );
+
+      console.log(
+        '📱 Phone Formats:',
         phoneFormats
       );
-    }
 
-    console.log(
-      '=========================================='
-    );
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
 
-    if (!item) {
-      return fail(
-        res,
-        401,
-        'Invalid mobile number or password'
-      );
-    }
+      /* ==========================================
+         FIND USER BY PHONE
+      ========================================== */
 
-    /* ==========================================
-       OTP
-    ========================================== */
+      const item =
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
 
-    const resend =
-      otpService.canResend(
-        normalizedPhone,
-        COOLDOWN_MS
-      );
+      /* ==========================================
+         SHOW MONGODB LOGIN DATA
+      ========================================== */
 
-    if (!resend.ok) {
+      console.log('\n');
 
       console.log(
-        '⏳ OTP COOLDOWN:',
-        Math.ceil(
-          resend.waitMs / 1000
-        ),
-        'seconds'
+        '========== MONGODB LOGIN RESULT =========='
+      );
+
+      if (item) {
+
+        console.log(
+          '✅ USER FOUND IN MONGODB'
+        );
+
+        console.log(
+          JSON.stringify(
+            {
+              _id:
+                item._id,
+
+              name:
+                item.name,
+
+              idNo:
+                item.idNo,
+
+              phone:
+                item.phone,
+
+              userImageUrl:
+                item.userImageUrl,
+
+              userImagePublicId:
+                item.userImagePublicId,
+
+              cardImageUrl:
+                item.cardImageUrl,
+
+              cardImagePublicId:
+                item.cardImagePublicId,
+
+              createdAt:
+                item.createdAt,
+
+              updatedAt:
+                item.updatedAt,
+            },
+            null,
+            2
+          )
+        );
+
+      } else {
+
+        console.log(
+          '❌ USER NOT FOUND IN MONGODB'
+        );
+
+        console.log(
+          'Searched Phone Formats:',
+          phoneFormats
+        );
+      }
+
+      console.log(
+        '=========================================='
+      );
+
+      if (!item) {
+
+        return fail(
+          res,
+          401,
+          'Invalid mobile number or password'
+        );
+      }
+
+      /* ==========================================
+         PASSWORD CHECK
+      ========================================== */
+
+      let passwordCorrect =
+        false;
+
+      /* New bcrypt password */
+
+      if (
+        item.password &&
+        String(
+          item.password
+        ).startsWith('$2')
+      ) {
+
+        passwordCorrect =
+          await bcrypt.compare(
+            password,
+            item.password
+          );
+
+      } else {
+
+        /*
+          Temporary support for old
+          plaintext passwords.
+        */
+
+        passwordCorrect =
+          password ===
+          String(
+            item.password || ''
+          );
+      }
+
+      if (!passwordCorrect) {
+
+        console.log(
+          '❌ PASSWORD INCORRECT'
+        );
+
+        return fail(
+          res,
+          401,
+          'Invalid mobile number or password'
+        );
+      }
+
+      console.log(
+        '✅ PASSWORD CORRECT'
+      );
+
+      /* ==========================================
+         OTP COOLDOWN
+      ========================================== */
+
+      const resend =
+        otpService.canResend(
+          normalizedPhone,
+          COOLDOWN_MS
+        );
+
+      if (!resend.ok) {
+
+        console.log(
+          '⏳ OTP COOLDOWN:',
+          Math.ceil(
+            resend.waitMs /
+              1000
+          ),
+          'seconds'
+        );
+
+        return fail(
+          res,
+          429,
+          `Naya OTP lane se pehle ${Math.ceil(
+            resend.waitMs / 1000
+          )}s ruko`
+        );
+      }
+
+      /* ==========================================
+         ISSUE OTP
+      ========================================== */
+
+      const otp =
+        otpService.issueOtp(
+          normalizedPhone,
+          OTP_TTL,
+          MAX_ATTEMPTS
+        );
+
+      console.log(
+        `[OTP] ${normalizedPhone}: ${otp}`
+      );
+
+      console.log(
+        '========================================\n'
+      );
+
+      return res.json({
+
+        success:
+          true,
+
+        message:
+          'Login successful',
+
+        otp,
+
+        expiresIn:
+          OTP_TTL,
+      });
+
+    } catch (e) {
+
+      console.error(
+        '❌ LOGIN ERROR:',
+        e
       );
 
       return fail(
         res,
-        429,
-        `Naya OTP lane se pehle ${Math.ceil(
-          resend.waitMs / 1000
-        )}s ruko`
+        500,
+        'Server/MongoDB error'
       );
     }
-
-    const otp =
-      otpService.issueOtp(
-        normalizedPhone,
-        OTP_TTL,
-        MAX_ATTEMPTS
-      );
-
-    console.log(
-      `[OTP] ${normalizedPhone}: ${otp}`
-    );
-
-    console.log(
-      '========================================\n'
-    );
-
-    return res.json({
-      success: true,
-      message: 'Login successful',
-      otp,
-      expiresIn: OTP_TTL,
-    });
-
-  } catch (e) {
-
-    console.error(
-      '❌ LOGIN ERROR:',
-      e
-    );
-
-    return fail(
-      res,
-      500,
-      'Server/MongoDB error'
-    );
   }
-});
+);
 
 /* =====================================================
    VERIFY OTP
@@ -543,12 +963,15 @@ app.post(
         ).trim();
 
       console.log('\n');
+
       console.log(
         '========================================'
       );
+
       console.log(
         '          🔢 VERIFY OTP REQUEST'
       );
+
       console.log(
         '========================================'
       );
@@ -563,23 +986,45 @@ app.post(
         otp
       );
 
-     const phoneDigits = String(phone || '').replace(/\D/g, '');
+      /* ==========================================
+         MOBILE VALIDATION
+         Any country
+         Minimum 6 digits
+      ========================================== */
 
-if (phoneDigits.length < 6) {
-  return fail(
-    res,
-    400,
-    'Invalid mobile number'
-  );
-}
+      if (
+        !isValidMobileNumber(
+          phone
+        )
+      ) {
 
-      if (!/^\d{4}$/.test(otp)) {
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
+      }
+
+      /* ==========================================
+         OTP VALIDATION
+      ========================================== */
+
+      if (
+        !/^\d{4}$/.test(
+          otp
+        )
+      ) {
+
         return fail(
           res,
           400,
           'OTP 4 digits ka hona chahiye'
         );
       }
+
+      /* ==========================================
+         VERIFY OTP
+      ========================================== */
 
       const result =
         otpService.verifyOtp(
@@ -612,13 +1057,21 @@ if (phoneDigits.length < 6) {
         return fail(
           res,
           401,
-          reasons[result.reason] ||
+          reasons[
+            result.reason
+          ] ||
             'OTP verification failed'
         );
       }
 
+      /* ==========================================
+         PHONE FORMATS
+      ========================================== */
+
       const phoneFormats =
-        getPhoneFormats(phone);
+        getPhoneFormats(
+          phone
+        );
 
       console.log(
         '📱 Phone Formats:',
@@ -630,18 +1083,26 @@ if (phoneDigits.length < 6) {
           'items'
         );
 
+      /* ==========================================
+         FIND USER
+      ========================================== */
+
       const user =
-        await itemsCollection.findOne({
-          phone: {
-            $in: phoneFormats,
-          },
-        });
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
 
       /* ==========================================
          MONGODB USER AFTER OTP
       ========================================== */
 
       console.log('\n');
+
       console.log(
         '====== MONGODB USER AFTER OTP ======'
       );
@@ -655,10 +1116,17 @@ if (phoneDigits.length < 6) {
         console.log(
           JSON.stringify(
             {
-              _id: user._id,
-              name: user.name,
-              idNo: user.idNo,
-              phone: user.phone,
+              _id:
+                user._id,
+
+              name:
+                user.name,
+
+              idNo:
+                user.idNo,
+
+              phone:
+                user.phone,
 
               userImageUrl:
                 user.userImageUrl,
@@ -695,6 +1163,7 @@ if (phoneDigits.length < 6) {
       );
 
       if (!user) {
+
         return fail(
           res,
           404,
@@ -710,7 +1179,9 @@ if (phoneDigits.length < 6) {
         jwt.sign(
           {
             userId:
-              String(user._id),
+              String(
+                user._id
+              ),
 
             phone:
               user.phone,
@@ -719,7 +1190,8 @@ if (phoneDigits.length < 6) {
           JWT_SECRET,
 
           {
-            expiresIn: '7d',
+            expiresIn:
+              '7d',
           }
         );
 
@@ -728,7 +1200,10 @@ if (phoneDigits.length < 6) {
       );
 
       return res.json({
-        success: true,
+
+        success:
+          true,
+
         message:
           'OTP verified successfully',
 
@@ -763,18 +1238,22 @@ app.get(
     try {
 
       console.log('\n');
+
       console.log(
         '========================================'
       );
+
       console.log(
         '              👤 /api/me'
       );
+
       console.log(
         '========================================'
       );
 
       const authHeader =
-        req.headers.authorization || '';
+        req.headers.authorization ||
+        '';
 
       if (
         !authHeader.startsWith(
@@ -805,6 +1284,10 @@ app.get(
         '🔑 Authorization token received'
       );
 
+      /* ==========================================
+         VERIFY JWT
+      ========================================== */
+
       const decoded =
         jwt.verify(
           token,
@@ -828,30 +1311,37 @@ app.get(
           'items'
         );
 
-      let user = null;
+      let user =
+        null;
 
       /* ==========================================
          FIND BY MONGODB ID
       ========================================== */
 
-      if (decoded.userId) {
+      if (
+        decoded.userId
+      ) {
 
         try {
 
           user =
-            await itemsCollection.findOne({
-              _id:
-                new mongoose.Types.ObjectId(
-                  decoded.userId
-                ),
-            });
+            await itemsCollection.findOne(
+              {
+                _id:
+                  new mongoose.Types.ObjectId(
+                    decoded.userId
+                  ),
+              }
+            );
 
           console.log(
             '🔎 MongoDB ID Search:',
             decoded.userId
           );
 
-        } catch (idError) {
+        } catch (
+          idError
+        ) {
 
           console.log(
             '❌ ID LOOKUP ERROR:',
@@ -880,11 +1370,14 @@ app.get(
         );
 
         user =
-          await itemsCollection.findOne({
-            phone: {
-              $in: phoneFormats,
-            },
-          });
+          await itemsCollection.findOne(
+            {
+              phone: {
+                $in:
+                  phoneFormats,
+              },
+            }
+          );
       }
 
       /* ==========================================
@@ -892,6 +1385,7 @@ app.get(
       ========================================== */
 
       console.log('\n');
+
       console.log(
         '========== RAW MONGODB USER =========='
       );
@@ -932,7 +1426,6 @@ app.get(
 
       /* ==========================================
          SAFE USER DATA
-         THIS DATA GOES TO APP
       ========================================== */
 
       const safeUser = {
@@ -952,30 +1445,36 @@ app.get(
           user.phone || '',
 
         userImageUrl:
-          user.userImageUrl || '',
+          user.userImageUrl ||
+          '',
 
         userImagePublicId:
-          user.userImagePublicId || '',
+          user.userImagePublicId ||
+          '',
 
         cardImageUrl:
-          user.cardImageUrl || '',
+          user.cardImageUrl ||
+          '',
 
         cardImagePublicId:
-          user.cardImagePublicId || '',
+          user.cardImagePublicId ||
+          '',
 
         createdAt:
-          user.createdAt || null,
+          user.createdAt ||
+          null,
 
         updatedAt:
-          user.updatedAt || null,
+          user.updatedAt ||
+          null,
       };
 
       /* ==========================================
-         MOST IMPORTANT LOG
-         DATA SENT TO REACT NATIVE APP
+         DATA SENT TO APP
       ========================================== */
 
       console.log('\n');
+
       console.log(
         '========== 📦 DATA SENT TO APP =========='
       );
@@ -1018,10 +1517,11 @@ app.get(
 
       return res.json({
 
-        success: true,
+        success:
+          true,
 
-        user: safeUser,
-
+        user:
+          safeUser,
       });
 
     } catch (e) {
@@ -1041,111 +1541,93 @@ app.get(
 );
 
 /* =====================================================
-   MONGODB CONNECTION (SERVERLESS-SAFE / VERCEL-READY)
-   Vercel serverless functions cold start hoti hain,
-   is liye connection cache karna zaroori hai warna
-   har request par naya connection banega.
+   MONGOOSE CONNECTION EVENTS
 ===================================================== */
 
-if (!process.env.MONGO_URI) {
+mongoose.connection.on(
+  'connected',
+  () => {
 
-  console.error(
-    '❌ MONGO_URI missing hai (Vercel dashboard env vars me daalo)'
-  );
-}
-
-let cached = global.__MONGO_CACHE__;
-
-if (!cached) {
-  cached = global.__MONGO_CACHE__ = {
-    conn: null,
-    promise: null,
-  };
-}
-
-async function connectDB() {
-
-  if (cached.conn) {
-    return cached.conn;
+    console.log(
+      '[MONGODB] Connected'
+    );
   }
+);
 
-  if (!cached.promise) {
-    cached.promise = mongoose
-      .connect(process.env.MONGO_URI)
-      .then((m) => m.connection);
+mongoose.connection.on(
+  'error',
+  (error) => {
+
+    console.error(
+      '[MONGODB] Error:',
+      error.message
+    );
   }
+);
 
-  cached.conn = await cached.promise;
+mongoose.connection.on(
+  'disconnected',
+  () => {
 
-  console.log('[OK] MongoDB connected');
-  console.log('[DB]', mongoose.connection.name);
-
-  return cached.conn;
-}
+    console.log(
+      '[MONGODB] Disconnected'
+    );
+  }
+);
 
 /* =====================================================
-   SERVERLESS EXPORT (VERCEL)
-   Vercel app ko import karta hai, listen nahi karta.
+   SERVERLESS EXPORT
 ===================================================== */
 
 module.exports = app;
 
 /* =====================================================
-   LOCAL DEV:
-   `node server.js` chalane par pehle MongoDB connect
-   hota hai phir listen — local behaviour same rahega.
+   LOCAL DEVELOPMENT
 ===================================================== */
 
-if (require.main === module) {
+if (
+  require.main === module
+) {
 
   connectDB()
 
-    .then(() => {
+    .then(
+      () => {
 
-      app.listen(
-        PORT,
-        '0.0.0.0',
-        () => {
+        app.listen(
+          PORT,
+          '0.0.0.0',
+          () => {
 
-          console.log(
-            `[OK] Server running on http://0.0.0.0:${PORT}`
-          );
+            console.log(
+              `[OK] Server running on http://0.0.0.0:${PORT}`
+            );
 
-          console.log(
-            `[OK] API: http://localhost:${PORT}`
-          );
+            console.log(
+              `[OK] API: http://localhost:${PORT}`
+            );
 
-          console.log(
-            `[OK] /api/me ready`
-          );
-        }
-      );
+            console.log(
+              `[OK] /api/me ready`
+            );
 
-    })
+          }
+        );
 
-    .catch((err) => {
+      }
+    )
 
-      console.error(
-        '[DB ERROR] Connection failed:',
-        err.message
-      );
+    .catch(
+      (err) => {
 
-    });
-}
+        console.error(
+          '[DB ERROR] Connection failed:',
+          err.message
+        );
 
-/* =====================================================
-   VERCEL:
-   Har serverless invocation par connection ensure hota hai.
-===================================================== */
-
-if (process.env.VERCEL) {
-
-  connectDB().catch((err) => {
-
-    console.error(
-      '[DB ERROR] Connection failed:',
-      err.message
+        process.exit(
+          1
+        );
+      }
     );
-
-  });
 }
