@@ -1,42 +1,141 @@
-
 const crypto = require('crypto');
+
+/* =====================================================
+   OTP SERVICE — Vercel / Serverless SAFE
+
+   ROOT FIX:
+   Pehle OTP ek in-memory Map me store hota tha.
+   Vercel serverless pe har cold start / alag instance
+   ka apna alag memory hoti hai, isliye verifyOtp ko
+   "no_otp" milta tha even jab OTP sahi ho.
+
+   Ab OTP STATELESS hai:
+   OTP khud SECRET + phone + time-window se derive hota
+   hai (HMAC-based). Verify ke waqt server wahi OTP
+   dobara calculate kar ke compare karta hai — koi store
+   ki zaroorat nahi, cold start / naya instance kuch
+   nahi bigadta.
+
+   In-memory Map sirf BEST-EFFORT cheezon ke liye hai:
+   resend cooldown, wrong attempts count, used-window.
+   Ye warm instance me theek chalte hain; instance
+   badalne pe reset ho jate hain (security-critical
+   nahi — OTP verification khud stateless hai).
+
+   Same exports / same contract as before:
+   - issueOtp(phone, ttlSeconds, maxAttempts) -> otp (4 digits)
+   - canResend(phone, cooldownMs)             -> { ok, waitMs }
+   - verifyOtp(phone, otp)                    -> { ok } | { ok:false, reason, attemptsLeft }
+===================================================== */
 
 const SECRET =
   process.env.OTP_SECRET ||
   'dev-otp-secret-change-me';
 
+/* Debug logs sirf jab OTP_DEBUG=true ho
+   (Vercel logs me OTP leak na ho) */
+const OTP_DEBUG =
+  process.env.OTP_DEBUG === 'true';
+
+/* Default window size (ms) — env se, warna 300s */
+function defaultWindowMs() {
+  const ttl =
+    parseInt(
+      process.env.OTP_TTL_SECONDS || '300',
+      10
+    );
+  return ttl * 1000;
+}
+
 /*
   phone ->
   {
-    otp,
-    hash,
-    expiresAt,
+    windowMs,
+    issuedWin,
+    issuedAt,
     attempts,
     maxAttempts,
-    lastSentAt
+    usedWin
   }
 */
 
-const store = new Map();
+/* Warm instances me survive karne ke liye global */
+const store =
+  global.__OTP_STORE__ ||
+  (global.__OTP_STORE__ = new Map());
 
 /* =====================================================
-   HMAC
+   DEBUG LOG HELPER
 ===================================================== */
 
-function hmac(
+function debugLog(...args) {
+  if (OTP_DEBUG) {
+    console.log(...args);
+  }
+}
+
+/* =====================================================
+   STATELESS OTP — HMAC of (phone : windowIndex)
+   Same instance, naya instance, cold start —
+   sab jagah same OTP milega jab tak window chal rahi hai.
+===================================================== */
+
+function otpForWindow(
   phone,
-  otp,
-  expiresAt
+  windowMs,
+  windowStart
 ) {
-  return crypto
-    .createHmac(
-      'sha256',
-      SECRET
-    )
-    .update(
-      `${phone}:${otp}:${expiresAt}`
-    )
-    .digest('hex');
+  const windowIndex =
+    Math.floor(
+      windowStart / windowMs
+    );
+
+  const digest =
+    crypto
+      .createHmac(
+        'sha256',
+        SECRET
+      )
+      .update(
+        `${phone}:${windowIndex}`
+      )
+      .digest('hex');
+
+  const num =
+    parseInt(
+      digest.slice(0, 8),
+      16
+    ) % 10000;
+
+  return String(num).padStart(4, '0');
+}
+
+/* =====================================================
+   TIMING-SAFE COMPARE
+   (pehle plain !== tha — timing attack possible)
+===================================================== */
+
+function safeEqual(a, b) {
+  const bufA =
+    Buffer.from(String(a));
+
+  const bufB =
+    Buffer.from(String(b));
+
+  if (bufA.length !== bufB.length) {
+    /* Length alag — dummy compare se
+       constant-ish time burn karo */
+    crypto.timingSafeEqual(
+      bufA,
+      Buffer.alloc(bufA.length)
+    );
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    bufA,
+    bufB
+  );
 }
 
 /* =====================================================
@@ -48,85 +147,78 @@ function issueOtp(
   ttlSeconds = 300,
   maxAttempts = 3
 ) {
-  /*
-    Generate exactly 4 digits.
-  */
-  const otp = String(
-    crypto.randomInt(
-      0,
-      10000
-    )
-  ).padStart(4, '0');
+  const windowMs =
+    parseInt(ttlSeconds, 10) * 1000 ||
+    defaultWindowMs();
 
-  const expiresAt =
-    Date.now() +
-    ttlSeconds * 1000;
+  const currentWindow =
+    Math.floor(
+      Date.now() / windowMs
+    ) * windowMs;
 
-  const lastSentAt =
-    Date.now();
-
-  const hash =
-    hmac(
+  /* Stateless OTP — store me sirf metadata */
+  const otp =
+    otpForWindow(
       phone,
-      otp,
-      expiresAt
+      windowMs,
+      currentWindow
     );
 
   store.set(
     phone,
     {
-      /*
-        Temporary plain OTP is kept only
-        so we can debug the local OTP flow.
-      */
-      otp,
+      windowMs,
 
-      hash,
+      issuedWin:
+        currentWindow,
 
-      expiresAt,
+      issuedAt:
+        Date.now(),
 
       attempts: 0,
 
-      maxAttempts,
+      maxAttempts:
+        parseInt(maxAttempts, 10) || 3,
 
-      lastSentAt,
+      usedWin: null,
     }
   );
 
-  console.log('');
-  console.log(
+  debugLog('');
+  debugLog(
     '========================================'
   );
-  console.log(
-    'OTP ISSUED'
+  debugLog(
+    'OTP ISSUED (stateless, HMAC window-based)'
   );
-  console.log(
+  debugLog(
     '========================================'
   );
-
-  console.log(
+  debugLog(
     'PHONE:',
     phone
   );
 
-  console.log(
+  /* OTP sirf debug mode me log hota hai
+     (production Vercel logs me leak nahi hoga) */
+  debugLog(
     'OTP:',
     otp
   );
 
-  console.log(
-    'EXPIRES:',
+  debugLog(
+    'WINDOW_MS:',
+    windowMs
+  );
+
+  debugLog(
+    'VALID UNTIL (window end + grace):',
     new Date(
-      expiresAt
+      currentWindow + windowMs * 2
     ).toISOString()
   );
 
-  console.log(
-    'STORE SIZE:',
-    store.size
-  );
-
-  console.log(
+  debugLog(
     '========================================'
   );
 
@@ -135,6 +227,8 @@ function issueOtp(
 
 /* =====================================================
    CAN RESEND
+   (best-effort, in-memory — instance change pe
+   cooldown reset ho sakta hai)
 ===================================================== */
 
 function canResend(
@@ -158,7 +252,7 @@ function canResend(
     cooldownMs -
     (
       Date.now() -
-      rec.lastSentAt
+      rec.issuedAt
     );
 
   if (waitMs > 0) {
@@ -176,109 +270,29 @@ function canResend(
 
 /* =====================================================
    VERIFY OTP
+   Stateless — current + previous window ka
+   expected OTP calculate kar ke compare karta hai.
+   Store sirf attempts/lock/used ke liye.
 ===================================================== */
 
 function verifyOtp(
   phone,
   otp
 ) {
-  console.log('');
-  console.log(
+  debugLog('');
+  debugLog(
     '========================================'
   );
-  console.log(
-    'OTP SERVICE VERIFY'
+  debugLog(
+    'OTP SERVICE VERIFY (stateless)'
   );
-  console.log(
+  debugLog(
     '========================================'
   );
-
-  console.log(
+  debugLog(
     'PHONE:',
     phone
   );
-
-  console.log(
-    'OTP RECEIVED:',
-    otp
-  );
-
-  const rec =
-    store.get(phone);
-
-  /*
-    No OTP found
-  */
-  if (!rec) {
-    console.log(
-      '❌ NO OTP RECORD'
-    );
-
-    return {
-      ok: false,
-      reason: 'no_otp',
-    };
-  }
-
-  console.log(
-    'OTP STORED:',
-    rec.otp
-  );
-
-  console.log(
-    'ATTEMPTS:',
-    rec.attempts
-  );
-
-  console.log(
-    'MAX ATTEMPTS:',
-    rec.maxAttempts
-  );
-
-  console.log(
-    'EXPIRES:',
-    new Date(
-      rec.expiresAt
-    ).toISOString()
-  );
-
-  /*
-    Expired
-  */
-  if (
-    Date.now() >
-    rec.expiresAt
-  ) {
-    console.log(
-      '❌ OTP EXPIRED'
-    );
-
-    store.delete(phone);
-
-    return {
-      ok: false,
-      reason: 'expired',
-    };
-  }
-
-  /*
-    Too many attempts
-  */
-  if (
-    rec.attempts >=
-    rec.maxAttempts
-  ) {
-    console.log(
-      '❌ OTP LOCKED'
-    );
-
-    store.delete(phone);
-
-    return {
-      ok: false,
-      reason: 'locked',
-    };
-  }
 
   /*
     Normalize received OTP
@@ -293,94 +307,202 @@ function verifyOtp(
         ''
       );
 
-  /*
-    Compare directly first.
-
-    This makes the local OTP flow
-    reliable.
-  */
-  if (
-    receivedOtp !==
-    rec.otp
-  ) {
-    console.log(
-      '❌ OTP DOES NOT MATCH'
-    );
-
-    console.log(
-      'EXPECTED:',
-      rec.otp
-    );
-
-    console.log(
-      'RECEIVED:',
-      receivedOtp
-    );
-
-    rec.attempts += 1;
-
-    store.set(
-      phone,
-      rec
-    );
-
-    return {
-      ok: false,
-      reason: 'wrong',
-      attemptsLeft:
-        Math.max(
-          0,
-          rec.maxAttempts -
-            rec.attempts
-        ),
-    };
-  }
+  const rec =
+    store.get(phone);
 
   /*
-    HMAC verification as an additional
-    integrity check.
+    Window size — rec se, warna env/default
+    (cold start pe rec nahi hoga, tab bhi
+    verification chalegi)
   */
-  const expectedHash =
-    hmac(
-      phone,
-      rec.otp,
-      rec.expiresAt
-    );
+  const windowMs =
+    (rec && rec.windowMs) ||
+    defaultWindowMs();
 
+  const now =
+    Date.now();
+
+  const currentWindow =
+    Math.floor(
+      now / windowMs
+    ) * windowMs;
+
+  const previousWindow =
+    currentWindow - windowMs;
+
+  /*
+    Expiry (jab record maujood ho)
+    OTP valid: issued window + next window
+    (grace — window boundary pe issue hua
+    OTP agle window me bhi verify ho sake)
+  */
   if (
-    expectedHash !==
-    rec.hash
+    rec &&
+    now >
+    rec.issuedWin + windowMs * 2
   ) {
-    console.log(
-      '❌ HMAC CHECK FAILED'
+    debugLog(
+      '❌ OTP EXPIRED'
     );
 
     store.delete(phone);
 
     return {
       ok: false,
+      reason: 'expired',
+    };
+  }
+
+  /*
+    Too many attempts (best-effort)
+  */
+  if (
+    rec &&
+    rec.attempts >=
+    rec.maxAttempts
+  ) {
+    debugLog(
+      '❌ OTP LOCKED'
+    );
+
+    store.delete(phone);
+
+    return {
+      ok: false,
+      reason: 'locked',
+    };
+  }
+
+  /*
+    Expected OTPs — current + previous window
+    (cold start / naya instance pe bhi same
+    calculate honge, kyunki SECRET + phone +
+    window se derive hote hain)
+  */
+  const expectedOtpCurrent =
+    otpForWindow(
+      phone,
+      windowMs,
+      currentWindow
+    );
+
+  const expectedOtpPrevious =
+    otpForWindow(
+      phone,
+      windowMs,
+      previousWindow
+    );
+
+  /*
+    Timing-safe compare dono windows se
+  */
+  const matchedCurrent =
+    safeEqual(
+      receivedOtp,
+      expectedOtpCurrent
+    );
+
+  const matchedPrevious =
+    matchedCurrent
+      ? false
+      : safeEqual(
+          receivedOtp,
+          expectedOtpPrevious
+        );
+
+  if (
+    !matchedCurrent &&
+    !matchedPrevious
+  ) {
+    debugLog(
+      '❌ OTP DOES NOT MATCH'
+    );
+
+    /*
+      Attempts count (best-effort) —
+      rec na ho to bhi create karo
+    */
+    const rec2 =
+      rec || {
+        windowMs,
+
+        issuedWin:
+          currentWindow,
+
+        issuedAt:
+          now,
+
+        maxAttempts: 3,
+
+        usedWin: null,
+      };
+
+    rec2.attempts =
+      (rec2.attempts || 0) + 1;
+
+    store.set(
+      phone,
+      rec2
+    );
+
+    return {
+      ok: false,
       reason: 'wrong',
+
+      attemptsLeft:
+        Math.max(
+          0,
+          (rec2.maxAttempts || 3) -
+            rec2.attempts
+        ),
+    };
+  }
+
+  const matchedWindow =
+    matchedCurrent
+      ? currentWindow
+      : previousWindow;
+
+  /*
+    Replay check (best-effort) —
+    same window ka OTP dobara use na ho
+  */
+  if (
+    rec &&
+    rec.usedWin ===
+    matchedWindow
+  ) {
+    debugLog(
+      '❌ OTP ALREADY USED'
+    );
+
+    return {
+      ok: false,
+      reason: 'no_otp',
     };
   }
 
   /*
     SUCCESS
   */
-  console.log(
-    '✅ OTP MATCHED'
+  debugLog(
+    '✅ OTP VERIFIED (window:',
+    matchedCurrent ? 'current' : 'previous',
+    ')'
   );
 
-  console.log(
-    '✅ OTP VERIFIED'
+  /* Window used mark karo — replay rokne ke liye */
+  store.set(
+    phone,
+    {
+      ...(rec || {}),
+
+      usedWin:
+        matchedWindow,
+    }
   );
 
-  store.delete(phone);
-
-  console.log(
-    'OTP RECORD DELETED'
-  );
-
-  console.log(
+  debugLog(
     '========================================'
   );
 
@@ -390,7 +512,7 @@ function verifyOtp(
 }
 
 /* =====================================================
-   EXPORTS
+   EXPORTS — same as before
 ===================================================== */
 
 module.exports = {
@@ -398,4 +520,3 @@ module.exports = {
   canResend,
   verifyOtp,
 };
-
