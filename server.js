@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -21,6 +22,8 @@ dns.setServers([
 /* =====================================================
    EXPRESS
 ===================================================== */
+
+app.use(cors());
 
 app.use(
   express.json({
@@ -86,7 +89,6 @@ if (!cached) {
 
 async function connectDB() {
 
-  /* Already connected */
   if (
     cached.conn &&
     mongoose.connection.readyState === 1
@@ -94,14 +96,11 @@ async function connectDB() {
     return cached.conn;
   }
 
-  /* Connection currently in progress */
   if (cached.promise) {
     return cached.promise;
   }
 
-  /* MONGO_URI check */
   if (!process.env.MONGO_URI) {
-
     throw new Error(
       'MONGO_URI environment variable is missing'
     );
@@ -182,8 +181,7 @@ app.use(
         message:
           'Database connection failed',
         error:
-          process.env.NODE_ENV ===
-          'production'
+          process.env.NODE_ENV === 'production'
             ? undefined
             : err.message,
       });
@@ -209,14 +207,12 @@ function normalizePhone(p) {
     return s;
   }
 
-  /* Already international */
   if (
     s.startsWith('+')
   ) {
     return s;
   }
 
-  /* Pakistan local number */
   if (
     /^0\d{9,10}$/.test(s)
   ) {
@@ -226,14 +222,12 @@ function normalizePhone(p) {
     );
   }
 
-  /* Pakistan without + */
   if (
     /^92\d{9,10}$/.test(s)
   ) {
     return '+' + s;
   }
 
-  /* Other countries */
   return s;
 }
 
@@ -265,7 +259,6 @@ function getPhoneFormats(phone) {
     formats.add(normalized);
   }
 
-  /* Pakistan +92 to local 03xx */
   if (
     normalized.startsWith('+92')
   ) {
@@ -276,7 +269,6 @@ function getPhoneFormats(phone) {
     );
   }
 
-  /* International without + */
   if (
     normalized.startsWith('+')
   ) {
@@ -293,8 +285,6 @@ function getPhoneFormats(phone) {
 
 /* =====================================================
    PHONE VALIDATION
-   Any country allowed.
-   Minimum 6 digits.
 ===================================================== */
 
 function isValidMobileNumber(phone) {
@@ -397,7 +387,7 @@ app.post(
       );
 
       console.log(
-        '         📝 REGISTER REQUEST'
+        '         REGISTER REQUEST'
       );
 
       console.log(
@@ -405,23 +395,23 @@ app.post(
       );
 
       console.log(
-        '📱 Phone:',
+        'Phone:',
         rawPhone
       );
 
       console.log(
-        '👤 Name:',
+        'Name:',
         req.body.name
       );
 
       console.log(
-        '🪪 CNIC:',
+        'CNIC:',
         req.body.cnic ||
-          req.body.idNo
+        req.body.idNo
       );
 
       console.log(
-        '🖼️ Image URL:',
+        'Image URL:',
         req.body.imageUrl
       );
 
@@ -463,7 +453,7 @@ app.post(
         );
 
       console.log(
-        '📱 Phone Formats:',
+        'Phone Formats:',
         phoneFormats
       );
 
@@ -484,10 +474,6 @@ app.post(
 
       if (existing) {
 
-        console.log(
-          '❌ REGISTER FAILED: Number already exists'
-        );
-
         return fail(
           res,
           409,
@@ -495,9 +481,7 @@ app.post(
         );
       }
 
-      /* ==========================================
-         PASSWORD HASH
-      ========================================== */
+      /* Password hash */
 
       const hashedPassword =
         await bcrypt.hash(
@@ -505,23 +489,21 @@ app.post(
           10
         );
 
-      /* ==========================================
-         NEW USER
-      ========================================== */
+      /* New user */
 
       const newUser = {
 
         name:
           String(
             req.body.name ||
-              'User'
+            'User'
           ),
 
         idNo:
           String(
             req.body.cnic ||
-              req.body.idNo ||
-              ''
+            req.body.idNo ||
+            ''
           ),
 
         phone:
@@ -535,17 +517,71 @@ app.post(
         userImageUrl:
           String(
             req.body.imageUrl ||
-              ''
+            ''
           ),
 
         userImagePublicId:
           '',
 
+        iqamaImageUrl:
+          String(
+            req.body.iqamaImageUrl ||
+            ''
+          ),
+
+        iqamaImagePublicId:
+          String(
+            req.body.iqamaImagePublicId ||
+            ''
+          ),
+
+        qrCode1Url:
+          String(
+            req.body.qrCode1Url ||
+            ''
+          ),
+
+        qrCode1PublicId:
+          String(
+            req.body.qrCode1PublicId ||
+            ''
+          ),
+
+        drivingLicenseImageUrl:
+          String(
+            req.body.drivingLicenseImageUrl ||
+            ''
+          ),
+
+        drivingLicenseImagePublicId:
+          String(
+            req.body.drivingLicenseImagePublicId ||
+            ''
+          ),
+
+        qrCode2Url:
+          String(
+            req.body.qrCode2Url ||
+            ''
+          ),
+
+        qrCode2PublicId:
+          String(
+            req.body.qrCode2PublicId ||
+            ''
+          ),
+
         cardImageUrl:
-          '',
+          String(
+            req.body.cardImageUrl ||
+            ''
+          ),
 
         cardImagePublicId:
-          '',
+          String(
+            req.body.cardImagePublicId ||
+            ''
+          ),
 
         createdAt:
           new Date(),
@@ -554,46 +590,19 @@ app.post(
           new Date(),
       };
 
-      console.log('\n');
-
-      console.log(
-        '========== DATA SAVING TO MONGODB =========='
-      );
-
-      console.log(
-        JSON.stringify(
-          {
-            ...newUser,
-            password:
-              '********',
-          },
-          null,
-          2
-        )
-      );
-
-      console.log(
-        '============================================='
-      );
-
       const result =
         await itemsCollection.insertOne(
           newUser
         );
 
       console.log(
-        '✅ USER INSERTED'
-      );
-
-      console.log(
-        '🆔 MongoDB ID:',
+        'USER INSERTED:',
         result.insertedId.toString()
       );
 
       return res.json({
 
-        success:
-          true,
+        success: true,
 
         message:
           'Successfully registered! Ab login karo.',
@@ -607,7 +616,7 @@ app.post(
     } catch (e) {
 
       console.error(
-        '❌ REGISTER ERROR:',
+        'REGISTER ERROR:',
         e
       );
 
@@ -640,34 +649,6 @@ app.post(
           req.body.password || ''
         );
 
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '             🔐 LOGIN REQUEST'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '📱 Requested Phone:',
-        rawPhone
-      );
-
-      console.log(
-        '🔑 Password Received:',
-        password
-          ? 'YES'
-          : 'NO'
-      );
-
-      /* Mobile validation */
-
       if (
         !isValidMobileNumber(
           rawPhone
@@ -680,8 +661,6 @@ app.post(
           'Invalid mobile number'
         );
       }
-
-      /* Password validation */
 
       if (!password) {
 
@@ -702,24 +681,10 @@ app.post(
           rawPhone
         );
 
-      console.log(
-        '📱 Normalized Phone:',
-        normalizedPhone
-      );
-
-      console.log(
-        '📱 Phone Formats:',
-        phoneFormats
-      );
-
       const itemsCollection =
         mongoose.connection.collection(
           'items'
         );
-
-      /* ==========================================
-         FIND USER BY PHONE
-      ========================================== */
 
       const item =
         await itemsCollection.findOne(
@@ -731,76 +696,6 @@ app.post(
           }
         );
 
-      /* ==========================================
-         SHOW MONGODB LOGIN DATA
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '========== MONGODB LOGIN RESULT =========='
-      );
-
-      if (item) {
-
-        console.log(
-          '✅ USER FOUND IN MONGODB'
-        );
-
-        console.log(
-          JSON.stringify(
-            {
-              _id:
-                item._id,
-
-              name:
-                item.name,
-
-              idNo:
-                item.idNo,
-
-              phone:
-                item.phone,
-
-              userImageUrl:
-                item.userImageUrl,
-
-              userImagePublicId:
-                item.userImagePublicId,
-
-              cardImageUrl:
-                item.cardImageUrl,
-
-              cardImagePublicId:
-                item.cardImagePublicId,
-
-              createdAt:
-                item.createdAt,
-
-              updatedAt:
-                item.updatedAt,
-            },
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND IN MONGODB'
-        );
-
-        console.log(
-          'Searched Phone Formats:',
-          phoneFormats
-        );
-      }
-
-      console.log(
-        '=========================================='
-      );
-
       if (!item) {
 
         return fail(
@@ -810,14 +705,10 @@ app.post(
         );
       }
 
-      /* ==========================================
-         PASSWORD CHECK
-      ========================================== */
+      /* Password check */
 
       let passwordCorrect =
         false;
-
-      /* New bcrypt password */
 
       if (
         item.password &&
@@ -834,11 +725,6 @@ app.post(
 
       } else {
 
-        /*
-          Temporary support for old
-          plaintext passwords.
-        */
-
         passwordCorrect =
           password ===
           String(
@@ -848,10 +734,6 @@ app.post(
 
       if (!passwordCorrect) {
 
-        console.log(
-          '❌ PASSWORD INCORRECT'
-        );
-
         return fail(
           res,
           401,
@@ -859,13 +741,7 @@ app.post(
         );
       }
 
-      console.log(
-        '✅ PASSWORD CORRECT'
-      );
-
-      /* ==========================================
-         OTP COOLDOWN
-      ========================================== */
+      /* OTP cooldown */
 
       const resend =
         otpService.canResend(
@@ -874,15 +750,6 @@ app.post(
         );
 
       if (!resend.ok) {
-
-        console.log(
-          '⏳ OTP COOLDOWN:',
-          Math.ceil(
-            resend.waitMs /
-              1000
-          ),
-          'seconds'
-        );
 
         return fail(
           res,
@@ -893,9 +760,7 @@ app.post(
         );
       }
 
-      /* ==========================================
-         ISSUE OTP
-      ========================================== */
+      /* Issue OTP */
 
       const otp =
         otpService.issueOtp(
@@ -908,14 +773,9 @@ app.post(
         `[OTP] ${normalizedPhone}: ${otp}`
       );
 
-      console.log(
-        '========================================\n'
-      );
-
       return res.json({
 
-        success:
-          true,
+        success: true,
 
         message:
           'Login successful',
@@ -929,7 +789,7 @@ app.post(
     } catch (e) {
 
       console.error(
-        '❌ LOGIN ERROR:',
+        'LOGIN ERROR:',
         e
       );
 
@@ -962,36 +822,6 @@ app.post(
           req.body.otp || ''
         ).trim();
 
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '          🔢 VERIFY OTP REQUEST'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '📱 Phone:',
-        phone
-      );
-
-      console.log(
-        '🔢 OTP:',
-        otp
-      );
-
-      /* ==========================================
-         MOBILE VALIDATION
-         Any country
-         Minimum 6 digits
-      ========================================== */
-
       if (
         !isValidMobileNumber(
           phone
@@ -1004,10 +834,6 @@ app.post(
           'Invalid mobile number'
         );
       }
-
-      /* ==========================================
-         OTP VALIDATION
-      ========================================== */
 
       if (
         !/^\d{4}$/.test(
@@ -1022,24 +848,18 @@ app.post(
         );
       }
 
-      /* ==========================================
-         VERIFY OTP
-      ========================================== */
-
       const result =
         otpService.verifyOtp(
           phone,
           otp
         );
 
-      console.log(
-        '🔐 OTP Result:',
-        result
-      );
-
       if (!result.ok) {
 
         const reasons = {
+
+          no_otp:
+            'Is number ke liye koi OTP issue nahi hua',
 
           no_orphan:
             'Is number ke liye koi OTP issue nahi hua',
@@ -1060,32 +880,19 @@ app.post(
           reasons[
             result.reason
           ] ||
-            'OTP verification failed'
+          'OTP verification failed'
         );
       }
-
-      /* ==========================================
-         PHONE FORMATS
-      ========================================== */
 
       const phoneFormats =
         getPhoneFormats(
           phone
         );
 
-      console.log(
-        '📱 Phone Formats:',
-        phoneFormats
-      );
-
       const itemsCollection =
         mongoose.connection.collection(
           'items'
         );
-
-      /* ==========================================
-         FIND USER
-      ========================================== */
 
       const user =
         await itemsCollection.findOne(
@@ -1097,71 +904,6 @@ app.post(
           }
         );
 
-      /* ==========================================
-         MONGODB USER AFTER OTP
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '====== MONGODB USER AFTER OTP ======'
-      );
-
-      if (user) {
-
-        console.log(
-          '✅ USER FOUND AFTER OTP'
-        );
-
-        console.log(
-          JSON.stringify(
-            {
-              _id:
-                user._id,
-
-              name:
-                user.name,
-
-              idNo:
-                user.idNo,
-
-              phone:
-                user.phone,
-
-              userImageUrl:
-                user.userImageUrl,
-
-              userImagePublicId:
-                user.userImagePublicId,
-
-              cardImageUrl:
-                user.cardImageUrl,
-
-              cardImagePublicId:
-                user.cardImagePublicId,
-
-              createdAt:
-                user.createdAt,
-
-              updatedAt:
-                user.updatedAt,
-            },
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND AFTER OTP'
-        );
-      }
-
-      console.log(
-        '===================================='
-      );
-
       if (!user) {
 
         return fail(
@@ -1171,9 +913,7 @@ app.post(
         );
       }
 
-      /* ==========================================
-         JWT
-      ========================================== */
+      /* JWT */
 
       const token =
         jwt.sign(
@@ -1195,14 +935,9 @@ app.post(
           }
         );
 
-      console.log(
-        '✅ JWT TOKEN CREATED'
-      );
-
       return res.json({
 
-        success:
-          true,
+        success: true,
 
         message:
           'OTP verified successfully',
@@ -1213,7 +948,7 @@ app.post(
     } catch (e) {
 
       console.error(
-        '❌ VERIFY OTP ERROR:',
+        'VERIFY OTP ERROR:',
         e
       );
 
@@ -1229,6 +964,20 @@ app.post(
 /* =====================================================
    GET CURRENT USER
    /api/me
+
+   RETURNS:
+   name
+   idNo
+   phone
+   userImageUrl
+   iqamaImageUrl
+   qrCode1Url
+   drivingLicenseImageUrl
+   qrCode2Url
+   cardImageUrl
+   all PublicIds
+   createdAt
+   updatedAt
 ===================================================== */
 
 app.get(
@@ -1244,7 +993,7 @@ app.get(
       );
 
       console.log(
-        '              👤 /api/me'
+        '              /api/me'
       );
 
       console.log(
@@ -1255,15 +1004,13 @@ app.get(
         req.headers.authorization ||
         '';
 
+      /* Authorization */
+
       if (
         !authHeader.startsWith(
           'Bearer '
         )
       ) {
-
-        console.log(
-          '❌ Authorization token missing'
-        );
 
         return fail(
           res,
@@ -1280,13 +1027,7 @@ app.get(
           )
           .trim();
 
-      console.log(
-        '🔑 Authorization token received'
-      );
-
-      /* ==========================================
-         VERIFY JWT
-      ========================================== */
+      /* JWT */
 
       const decoded =
         jwt.verify(
@@ -1295,15 +1036,13 @@ app.get(
         );
 
       console.log(
-        '✅ JWT DECODED:'
+        'JWT USER ID:',
+        decoded.userId
       );
 
       console.log(
-        JSON.stringify(
-          decoded,
-          null,
-          2
-        )
+        'JWT PHONE:',
+        decoded.phone
       );
 
       const itemsCollection =
@@ -1334,17 +1073,10 @@ app.get(
               }
             );
 
-          console.log(
-            '🔎 MongoDB ID Search:',
-            decoded.userId
-          );
-
-        } catch (
-          idError
-        ) {
+        } catch (idError) {
 
           console.log(
-            '❌ ID LOOKUP ERROR:',
+            'ID LOOKUP ERROR:',
             idError.message
           );
         }
@@ -1364,11 +1096,6 @@ app.get(
             decoded.phone
           );
 
-        console.log(
-          '🔎 Fallback Phone Search:',
-          phoneFormats
-        );
-
         user =
           await itemsCollection.findOne(
             {
@@ -1381,39 +1108,8 @@ app.get(
       }
 
       /* ==========================================
-         SHOW RAW MONGODB DATA
+         USER NOT FOUND
       ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '========== RAW MONGODB USER =========='
-      );
-
-      if (user) {
-
-        console.log(
-          '✅ USER FOUND IN MONGODB'
-        );
-
-        console.log(
-          JSON.stringify(
-            user,
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND IN MONGODB'
-        );
-      }
-
-      console.log(
-        '======================================='
-      );
 
       if (!user) {
 
@@ -1426,6 +1122,10 @@ app.get(
 
       /* ==========================================
          SAFE USER DATA
+
+         Password NEVER returned.
+
+         Baqi required fields returned.
       ========================================== */
 
       const safeUser = {
@@ -1436,13 +1136,18 @@ app.get(
           ),
 
         name:
-          user.name || '',
+          user.name ||
+          '',
 
         idNo:
-          user.idNo || '',
+          user.idNo ||
+          '',
 
         phone:
-          user.phone || '',
+          user.phone ||
+          '',
+
+        /* User image */
 
         userImageUrl:
           user.userImageUrl ||
@@ -1452,6 +1157,48 @@ app.get(
           user.userImagePublicId ||
           '',
 
+        /* Iqama */
+
+        iqamaImageUrl:
+          user.iqamaImageUrl ||
+          '',
+
+        iqamaImagePublicId:
+          user.iqamaImagePublicId ||
+          '',
+
+        /* QR Code 1 */
+
+        qrCode1Url:
+          user.qrCode1Url ||
+          '',
+
+        qrCode1PublicId:
+          user.qrCode1PublicId ||
+          '',
+
+        /* Driving License */
+
+        drivingLicenseImageUrl:
+          user.drivingLicenseImageUrl ||
+          '',
+
+        drivingLicenseImagePublicId:
+          user.drivingLicenseImagePublicId ||
+          '',
+
+        /* QR Code 2 */
+
+        qrCode2Url:
+          user.qrCode2Url ||
+          '',
+
+        qrCode2PublicId:
+          user.qrCode2PublicId ||
+          '',
+
+        /* Card */
+
         cardImageUrl:
           user.cardImageUrl ||
           '',
@@ -1459,6 +1206,8 @@ app.get(
         cardImagePublicId:
           user.cardImagePublicId ||
           '',
+
+        /* Dates */
 
         createdAt:
           user.createdAt ||
@@ -1470,13 +1219,11 @@ app.get(
       };
 
       /* ==========================================
-         DATA SENT TO APP
+         LOG DATA
       ========================================== */
 
-      console.log('\n');
-
       console.log(
-        '========== 📦 DATA SENT TO APP =========='
+        '========== USER DATA SENT TO APP =========='
       );
 
       console.log(
@@ -1491,29 +1238,9 @@ app.get(
         '=========================================='
       );
 
-      console.log(
-        '🖼️ USER IMAGE URL:',
-        safeUser.userImageUrl
-      );
-
-      console.log(
-        '🪪 CARD IMAGE URL:',
-        safeUser.cardImageUrl
-      );
-
-      console.log(
-        '👤 NAME:',
-        safeUser.name
-      );
-
-      console.log(
-        '📱 PHONE:',
-        safeUser.phone
-      );
-
-      console.log(
-        '========================================\n'
-      );
+      /* ==========================================
+         RESPONSE
+      ========================================== */
 
       return res.json({
 
@@ -1527,7 +1254,7 @@ app.get(
     } catch (e) {
 
       console.error(
-        '❌ ME ERROR:',
+        'ME ERROR:',
         e
       );
 
@@ -1535,6 +1262,134 @@ app.get(
         res,
         401,
         'Token invalid ya expired hai'
+      );
+    }
+  }
+);
+
+/* =====================================================
+   GET ALL DATA
+   GET /api/data
+
+   Password excluded.
+===================================================== */
+
+app.get(
+  '/api/data',
+  async (req, res) => {
+
+    try {
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      const docs =
+        await itemsCollection
+          .find(
+            {},
+            {
+              projection: {
+                password: 0,
+              },
+            }
+          )
+          .toArray();
+
+      console.log(
+        '[DATA] Records fetched:',
+        docs.length
+      );
+
+      return res.json({
+
+        success:
+          true,
+
+        count:
+          docs.length,
+
+        data:
+          docs,
+      });
+
+    } catch (e) {
+
+      console.error(
+        'DATA ERROR:',
+        e
+      );
+
+      return fail(
+        res,
+        500,
+        'Data fetch failed'
+      );
+    }
+  }
+);
+
+/* =====================================================
+   GET DATA BY ID
+   GET /api/data/:id
+===================================================== */
+
+app.get(
+  '/api/data/:id',
+  async (req, res) => {
+
+    try {
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      const doc =
+        await itemsCollection.findOne(
+          {
+            _id:
+              new mongoose.Types.ObjectId(
+                req.params.id
+              ),
+          },
+          {
+            projection: {
+              password: 0,
+            },
+          }
+        );
+
+      if (!doc) {
+
+        return fail(
+          res,
+          404,
+          'Record nahi mila'
+        );
+      }
+
+      return res.json({
+
+        success:
+          true,
+
+        data:
+          doc,
+      });
+
+    } catch (e) {
+
+      console.error(
+        'DATA BY ID ERROR:',
+        e
+      );
+
+      return fail(
+        res,
+        500,
+        'Data fetch failed'
       );
     }
   }
