@@ -1,3 +1,4 @@
+
 const crypto = require('crypto');
 
 const SECRET =
@@ -16,12 +17,7 @@ const SECRET =
   }
 */
 
-/* Same as aapka original Map — bas global pe rakha hai taaki
-   Vercel ke warm instance me module reload hone par OTP bache
-   (flow / contract bilkul same hai) */
-const store =
-  global.__OTP_STORE__ ||
-  (global.__OTP_STORE__ = new Map());
+const store = new Map();
 
 /* =====================================================
    HMAC
