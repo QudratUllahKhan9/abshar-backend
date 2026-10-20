@@ -1,7 +1,6 @@
 require('dotenv').config();
 
 const express = require('express');
-const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -22,10 +21,6 @@ dns.setServers([
 /* =====================================================
    EXPRESS
 ===================================================== */
-
-app.use(
-  cors()
-);
 
 app.use(
   express.json({
@@ -1046,9 +1041,6 @@ app.post(
 
         const reasons = {
 
-          no_otp:
-            'Is number ke liye koi OTP issue nahi hua',
-
           no_orphan:
             'Is number ke liye koi OTP issue nahi hua',
 
@@ -1123,7 +1115,37 @@ app.post(
 
         console.log(
           JSON.stringify(
-            user,
+            {
+              _id:
+                user._id,
+
+              name:
+                user.name,
+
+              idNo:
+                user.idNo,
+
+              phone:
+                user.phone,
+
+              userImageUrl:
+                user.userImageUrl,
+
+              userImagePublicId:
+                user.userImagePublicId,
+
+              cardImageUrl:
+                user.cardImageUrl,
+
+              cardImagePublicId:
+                user.cardImagePublicId,
+
+              createdAt:
+                user.createdAt,
+
+              updatedAt:
+                user.updatedAt,
+            },
             null,
             2
           )
@@ -1207,8 +1229,6 @@ app.post(
 /* =====================================================
    GET CURRENT USER
    /api/me
-   MongoDB ka SARA data return hota hai
-   (sirf password hash chhupta hai)
 ===================================================== */
 
 app.get(
@@ -1406,20 +1426,47 @@ app.get(
 
       /* ==========================================
          SAFE USER DATA
-         MongoDB ka SARA data (poora document)
-         sirf password hash hide hota hai
       ========================================== */
 
-      const { password: hiddenPassword, ...allMongoData } = user;
-
       const safeUser = {
-
-        ...allMongoData,
 
         id:
           String(
             user._id
           ),
+
+        name:
+          user.name || '',
+
+        idNo:
+          user.idNo || '',
+
+        phone:
+          user.phone || '',
+
+        userImageUrl:
+          user.userImageUrl ||
+          '',
+
+        userImagePublicId:
+          user.userImagePublicId ||
+          '',
+
+        cardImageUrl:
+          user.cardImageUrl ||
+          '',
+
+        cardImagePublicId:
+          user.cardImagePublicId ||
+          '',
+
+        createdAt:
+          user.createdAt ||
+          null,
+
+        updatedAt:
+          user.updatedAt ||
+          null,
       };
 
       /* ==========================================
@@ -1488,119 +1535,6 @@ app.get(
         res,
         401,
         'Token invalid ya expired hai'
-      );
-    }
-  }
-);
-
-/* =====================================================
-   GET DATA FROM MONGODB
-   GET /api/data       -> sab records
-   GET /api/data/:id   -> ek record
-   (password hash kabhi return nahi hota)
-===================================================== */
-
-app.get(
-  '/api/data',
-  async (req, res) => {
-
-    try {
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      const docs =
-        await itemsCollection
-          .find(
-            {},
-            {
-              projection: {
-                password: 0,
-              },
-            }
-          )
-          .toArray();
-
-      console.log(
-        '[DATA] Records fetched:',
-        docs.length
-      );
-
-      return res.json({
-        success: true,
-        count: docs.length,
-        data: docs,
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ DATA ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        500,
-        'Data fetch failed'
-      );
-    }
-  }
-);
-
-app.get(
-  '/api/data/:id',
-  async (req, res) => {
-
-    try {
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      const doc =
-        await itemsCollection.findOne(
-          {
-            _id:
-              new mongoose.Types.ObjectId(
-                req.params.id
-              ),
-          },
-          {
-            projection: {
-              password: 0,
-            },
-          }
-        );
-
-      if (!doc) {
-
-        return fail(
-          res,
-          404,
-          'Record nahi mila'
-        );
-      }
-
-      return res.json({
-        success: true,
-        data: doc,
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ DATA (BY ID) ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        500,
-        'Data fetch failed'
       );
     }
   }
