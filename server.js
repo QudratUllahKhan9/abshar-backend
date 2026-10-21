@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 
 const express = require('express');
@@ -87,6 +88,7 @@ if (!cached) {
 async function connectDB() {
 
   /* Already connected */
+
   if (
     cached.conn &&
     mongoose.connection.readyState === 1
@@ -95,13 +97,14 @@ async function connectDB() {
   }
 
   /* Connection currently in progress */
+
   if (cached.promise) {
     return cached.promise;
   }
 
   /* MONGO_URI check */
-  if (!process.env.MONGO_URI) {
 
+  if (!process.env.MONGO_URI) {
     throw new Error(
       'MONGO_URI environment variable is missing'
     );
@@ -210,6 +213,7 @@ function normalizePhone(p) {
   }
 
   /* Already international */
+
   if (
     s.startsWith('+')
   ) {
@@ -217,6 +221,7 @@ function normalizePhone(p) {
   }
 
   /* Pakistan local number */
+
   if (
     /^0\d{9,10}$/.test(s)
   ) {
@@ -227,6 +232,7 @@ function normalizePhone(p) {
   }
 
   /* Pakistan without + */
+
   if (
     /^92\d{9,10}$/.test(s)
   ) {
@@ -234,6 +240,7 @@ function normalizePhone(p) {
   }
 
   /* Other countries */
+
   return s;
 }
 
@@ -266,6 +273,7 @@ function getPhoneFormats(phone) {
   }
 
   /* Pakistan +92 to local 03xx */
+
   if (
     normalized.startsWith('+92')
   ) {
@@ -277,6 +285,7 @@ function getPhoneFormats(phone) {
   }
 
   /* International without + */
+
   if (
     normalized.startsWith('+')
   ) {
@@ -415,13 +424,14 @@ app.post(
       );
 
       console.log(
-        '🪪 CNIC:',
-        req.body.cnic ||
-          req.body.idNo
+        '🪪 ID NO:',
+        req.body.idNo ||
+        req.body.cnic
       );
 
       console.log(
-        '🖼️ Image URL:',
+        '🖼️ User Image:',
+        req.body.userImageUrl ||
         req.body.imageUrl
       );
 
@@ -514,14 +524,14 @@ app.post(
         name:
           String(
             req.body.name ||
-              'User'
+            'User'
           ),
 
         idNo:
           String(
+            req.body.idNo ||
             req.body.cnic ||
-              req.body.idNo ||
-              ''
+            ''
           ),
 
         phone:
@@ -532,20 +542,66 @@ app.post(
         password:
           hashedPassword,
 
+        /* User profile image */
+
         userImageUrl:
           String(
+            req.body.userImageUrl ||
             req.body.imageUrl ||
-              ''
+            ''
+          ),
+
+        /* Iqama image */
+
+        iqamaImageUrl:
+          String(
+            req.body.iqamaImageUrl ||
+            ''
+          ),
+
+        /* QR Code 1 */
+
+        qrCode1Url:
+          String(
+            req.body.qrCode1Url ||
+            ''
+          ),
+
+        /* Driving License */
+
+        drivingLicenseImageUrl:
+          String(
+            req.body.drivingLicenseImageUrl ||
+            ''
+          ),
+
+        /* QR Code 2 */
+
+        qrCode2Url:
+          String(
+            req.body.qrCode2Url ||
+            ''
+          ),
+
+        /* Card image */
+
+        cardImageUrl:
+          String(
+            req.body.cardImageUrl ||
+            ''
           ),
 
         userImagePublicId:
-          '',
-
-        cardImageUrl:
-          '',
+          String(
+            req.body.userImagePublicId ||
+            ''
+          ),
 
         cardImagePublicId:
-          '',
+          String(
+            req.body.cardImagePublicId ||
+            ''
+          ),
 
         createdAt:
           new Date(),
@@ -765,11 +821,23 @@ app.post(
               userImageUrl:
                 item.userImageUrl,
 
-              userImagePublicId:
-                item.userImagePublicId,
+              iqamaImageUrl:
+                item.iqamaImageUrl,
+
+              qrCode1Url:
+                item.qrCode1Url,
+
+              drivingLicenseImageUrl:
+                item.drivingLicenseImageUrl,
+
+              qrCode2Url:
+                item.qrCode2Url,
 
               cardImageUrl:
                 item.cardImageUrl,
+
+              userImagePublicId:
+                item.userImagePublicId,
 
               cardImagePublicId:
                 item.cardImagePublicId,
@@ -879,7 +947,7 @@ app.post(
           '⏳ OTP COOLDOWN:',
           Math.ceil(
             resend.waitMs /
-              1000
+            1000
           ),
           'seconds'
         );
@@ -1041,6 +1109,9 @@ app.post(
 
         const reasons = {
 
+          no_otp:
+            'Is number ke liye koi OTP issue nahi hua',
+
           no_orphan:
             'Is number ke liye koi OTP issue nahi hua',
 
@@ -1051,7 +1122,9 @@ app.post(
             'Bahut zyada galat attempts. Dobara login karke naya OTP lo.',
 
           wrong:
-            `OTP galat hai. ${result.attemptsLeft} attempts baqi hain.`,
+            `OTP galat hai. ${
+              result.attemptsLeft ?? 0
+            } attempts baqi hain.`,
         };
 
         return fail(
@@ -1131,11 +1204,23 @@ app.post(
               userImageUrl:
                 user.userImageUrl,
 
-              userImagePublicId:
-                user.userImagePublicId,
+              iqamaImageUrl:
+                user.iqamaImageUrl,
+
+              qrCode1Url:
+                user.qrCode1Url,
+
+              drivingLicenseImageUrl:
+                user.drivingLicenseImageUrl,
+
+              qrCode2Url:
+                user.qrCode2Url,
 
               cardImageUrl:
                 user.cardImageUrl,
+
+              userImagePublicId:
+                user.userImagePublicId,
 
               cardImagePublicId:
                 user.cardImagePublicId,
@@ -1444,21 +1529,43 @@ app.get(
         phone:
           user.phone || '',
 
-        userImageUrl:
-          user.userImageUrl ||
-          '',
+        /* Profile */
 
-        userImagePublicId:
-          user.userImagePublicId ||
-          '',
+        userImageUrl:
+          user.userImageUrl || '',
+
+        /* Iqama */
+
+        iqamaImageUrl:
+          user.iqamaImageUrl || '',
+
+        /* QR Code 1 */
+
+        qrCode1Url:
+          user.qrCode1Url || '',
+
+        /* Driving License */
+
+        drivingLicenseImageUrl:
+          user.drivingLicenseImageUrl || '',
+
+        /* QR Code 2 */
+
+        qrCode2Url:
+          user.qrCode2Url || '',
+
+        /* Card */
 
         cardImageUrl:
-          user.cardImageUrl ||
-          '',
+          user.cardImageUrl || '',
+
+        /* Cloudinary IDs */
+
+        userImagePublicId:
+          user.userImagePublicId || '',
 
         cardImagePublicId:
-          user.cardImagePublicId ||
-          '',
+          user.cardImagePublicId || '',
 
         createdAt:
           user.createdAt ||
@@ -1497,6 +1604,26 @@ app.get(
       );
 
       console.log(
+        '🪪 IQAMA IMAGE URL:',
+        safeUser.iqamaImageUrl
+      );
+
+      console.log(
+        '🔳 QR CODE 1 URL:',
+        safeUser.qrCode1Url
+      );
+
+      console.log(
+        '🚗 DRIVING LICENSE URL:',
+        safeUser.drivingLicenseImageUrl
+      );
+
+      console.log(
+        '🔳 QR CODE 2 URL:',
+        safeUser.qrCode2Url
+      );
+
+      console.log(
         '🪪 CARD IMAGE URL:',
         safeUser.cardImageUrl
       );
@@ -1504,6 +1631,11 @@ app.get(
       console.log(
         '👤 NAME:',
         safeUser.name
+      );
+
+      console.log(
+        '🆔 ID NO:',
+        safeUser.idNo
       );
 
       console.log(
@@ -1631,3 +1763,4 @@ if (
       }
     );
 }
+
