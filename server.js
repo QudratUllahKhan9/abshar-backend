@@ -1,1766 +1,1171 @@
 
-require('dotenv').config();
+import { useEffect, useMemo, useState } from "react";
+import "./App.css";
 
-const express = require('express');
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const dns = require('dns');
-const otpService = require('./otpService');
+const API_BASE_URL =
+  "https://absher-deshboard-backend.vercel.app/api/items";
 
-const app = express();
+const THEME_KEY = "peoplehub_theme";
 
-/* =====================================================
-   DNS
-===================================================== */
+const IMAGE_FIELDS = [
+  { key: "userImage", label: "Profile Photo", icon: "👤" },
+  { key: "cardImage", label: "ID Card", icon: "🪪" },
+  { key: "iqamaImage", label: "Iqama", icon: "📄" },
+  { key: "qrCode1", label: "QR Code 1", icon: "▦" },
+  {
+    key: "drivingLicenseImage",
+    label: "Driving Licence",
+    icon: "🚘",
+  },
+  { key: "qrCode2", label: "QR Code 2", icon: "▦" },
+];
 
-dns.setServers([
-  '1.1.1.1',
-  '8.8.8.8',
-]);
+const EMPTY_FORM = {
+  name: "",
+  idNo: "",
+  phone: "",
+  password: "",
 
-/* =====================================================
-   EXPRESS
-===================================================== */
+  // Passport Information
+  passportNo: "PT4133313",
+  passportType: "Regular",
+  passportIssueDate: "20/02/2025",
+  passportExpiryDate: "21/02/2030",
+  passportPlaceOfIssue: "Pakistan",
+  passportStatus: "Valid",
 
-app.use(
-  express.json({
-    limit: '10mb',
-  })
-);
+  // Resident ID (Iqama) Details
+  idVersion: "2",
+  iqamaIssueDate: "21/09/2025",
+  iqamaExpiryDate: "22/07/2027",
 
-app.use(
-  express.urlencoded({
-    extended: true,
-    limit: '10mb',
-  })
-);
+  // Travel Record & Status
+  travelStatus: "Inside the Kingdom",
+  lastTravelDestination: "Pakistan",
+  lastTravelDate: "12/08/2025",
+  balance: "0.00 SAR",
+};
 
-/* =====================================================
-   CONFIG
-===================================================== */
+function normalizeItem(item = {}) {
+  return {
+    ...item,
+    id: String(item._id || item.id || ""),
 
-const PORT =
-  process.env.PORT || 5000;
+    userImageUrl:
+      item.userImageUrl || item.images?.userImage || "",
+    cardImageUrl:
+      item.cardImageUrl || item.images?.cardImage || "",
+    iqamaImageUrl:
+      item.iqamaImageUrl || item.images?.iqamaImage || "",
+    qrCode1Url:
+      item.qrCode1Url || item.images?.qrCode1 || "",
+    drivingLicenseImageUrl:
+      item.drivingLicenseImageUrl ||
+      item.images?.drivingLicenseImage ||
+      "",
+    qrCode2Url:
+      item.qrCode2Url || item.images?.qrCode2 || "",
 
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  'change_this_to_a_real_secret';
-
-const OTP_TTL =
-  parseInt(
-    process.env.OTP_TTL_SECONDS || '300',
-    10
-  );
-
-const MAX_ATTEMPTS =
-  parseInt(
-    process.env.OTP_ATTEMPTS_MAX || '3',
-    10
-  );
-
-const COOLDOWN_MS =
-  parseInt(
-    process.env.OTP_RESEND_COOLDOWN_MS || '60000',
-    10
-  );
-
-/* =====================================================
-   MONGODB CONNECTION CACHE
-   Vercel / Serverless safe
-===================================================== */
-
-let cached =
-  global.__MONGO_CACHE__;
-
-if (!cached) {
-  cached =
-    global.__MONGO_CACHE__ = {
-      conn: null,
-      promise: null,
-    };
+    images: {
+      userImage:
+        item.userImageUrl || item.images?.userImage || "",
+      cardImage:
+        item.cardImageUrl || item.images?.cardImage || "",
+      iqamaImage:
+        item.iqamaImageUrl || item.images?.iqamaImage || "",
+      qrCode1:
+        item.qrCode1Url || item.images?.qrCode1 || "",
+      drivingLicenseImage:
+        item.drivingLicenseImageUrl ||
+        item.images?.drivingLicenseImage ||
+        "",
+      qrCode2:
+        item.qrCode2Url || item.images?.qrCode2 || "",
+    },
+  };
 }
 
-/* =====================================================
-   CONNECT DATABASE
-===================================================== */
+function extractItems(data) {
+  const candidates = [
+    data?.items,
+    data?.data?.items,
+    data?.data,
+    data?.results,
+  ];
 
-async function connectDB() {
+  return candidates.find(Array.isArray) || [];
+}
 
-  /* Already connected */
+function extractItem(data) {
+  return (
+    data?.item ||
+    data?.data?.item ||
+    data?.data?.record ||
+    data?.record ||
+    data?.data ||
+    data
+  );
+}
 
-  if (
-    cached.conn &&
-    mongoose.connection.readyState === 1
-  ) {
-    return cached.conn;
+async function readApiError(response) {
+  let data = {};
+
+  try {
+    data = await response.json();
+  } catch {
+    // Response may not contain JSON.
   }
 
-  /* Connection currently in progress */
-
-  if (cached.promise) {
-    return cached.promise;
-  }
-
-  /* MONGO_URI check */
-
-  if (!process.env.MONGO_URI) {
+  if (!response.ok || data.success === false) {
     throw new Error(
-      'MONGO_URI environment variable is missing'
+      data.message ||
+        data.error?.message ||
+        `Request failed (${response.status})`
     );
   }
 
-  console.log(
-    '[DB] Connecting to MongoDB...'
-  );
-
-  cached.promise =
-    mongoose
-      .connect(
-        process.env.MONGO_URI,
-        {
-          serverSelectionTimeoutMS: 10000,
-          connectTimeoutMS: 10000,
-          socketTimeoutMS: 45000,
-        }
-      )
-      .then(
-        (mongooseInstance) => {
-
-          cached.conn =
-            mongooseInstance.connection;
-
-          console.log(
-            '[OK] MongoDB connected'
-          );
-
-          console.log(
-            '[DB]',
-            cached.conn.name
-          );
-
-          return cached.conn;
-        }
-      )
-      .catch(
-        (error) => {
-
-          console.error(
-            '[DB ERROR]',
-            error.message
-          );
-
-          cached.promise = null;
-          cached.conn = null;
-
-          throw error;
-        }
-      );
-
-  return cached.promise;
+  return data;
 }
 
-/* =====================================================
-   DATABASE MIDDLEWARE
-===================================================== */
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [images, setImages] = useState({});
+  const [imageFiles, setImageFiles] = useState({});
+  const [removedImages, setRemovedImages] = useState({});
+  const [originalImages, setOriginalImages] = useState({});
 
-app.use(
-  async (req, res, next) => {
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState(null);
+  const [query, setQuery] = useState("");
 
-    try {
+  const [theme, setTheme] = useState(
+    () => localStorage.getItem(THEME_KEY) || "light"
+  );
 
-      await connectDB();
+  const [toast, setToast] = useState("");
+  const [saving, setSaving] = useState(false);
 
-      next();
+  // Load records from backend.
+  useEffect(() => {
+    let active = true;
 
-    } catch (err) {
+    async function loadItems() {
+      try {
+        const response = await fetch(API_BASE_URL);
+        const data = await readApiError(response);
 
-      console.error(
-        '[DB ERROR] Connection failed:',
-        err.message
-      );
+        if (active) {
+          setItems(extractItems(data).map(normalizeItem));
+        }
+      } catch (error) {
+        if (active) {
+          notify(`Could not load records: ${error.message}`);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
 
-      return res.status(500).json({
-        success: false,
-        message:
-          'Database connection failed',
-        error:
-          process.env.NODE_ENV ===
-          'production'
-            ? undefined
-            : err.message,
-      });
+    loadItems();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Theme preference.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  function notify(message) {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 3000);
+  }
+
+  function resetForm() {
+    setForm(EMPTY_FORM);
+    setImages({});
+    setImageFiles({});
+    setRemovedImages({});
+    setOriginalImages({});
+    setEditingId(null);
+
+    const formElement = document.getElementById("record-form");
+    formElement?.reset();
+  }
+
+  function handleChange(event) {
+    const { name, value } = event.target;
+
+    setForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+  }
+
+  function handleImage(event, key) {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      notify("Please select an image file.");
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > 1.5 * 1024 * 1024) {
+      notify("Please choose an image smaller than 1.5 MB.");
+      event.target.value = "";
+      return;
+    }
+
+    setImageFiles((previous) => ({
+      ...previous,
+      [key]: file,
+    }));
+
+    setRemovedImages((previous) => ({
+      ...previous,
+      [key]: false,
+    }));
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      setImages((previous) => ({
+        ...previous,
+        [key]: reader.result,
+      }));
+    };
+
+    reader.onerror = () => {
+      notify("Could not preview this image.");
+    };
+
+    reader.readAsDataURL(file);
+  }
+
+  function removeImage(key) {
+    setImages((previous) => {
+      const next = { ...previous };
+      delete next[key];
+      return next;
+    });
+
+    setImageFiles((previous) => {
+      const next = { ...previous };
+      delete next[key];
+      return next;
+    });
+
+    if (editingId && originalImages[key]) {
+      setRemovedImages((previous) => ({
+        ...previous,
+        [key]: true,
+      }));
+    }
+
+    const input = document.getElementById(`image-${key}`);
+
+    if (input) {
+      input.value = "";
     }
   }
-);
 
-/* =====================================================
-   PHONE NORMALIZE
-===================================================== */
+  // Create a new record or update an existing record.
+  async function handleSubmit(event) {
+    event.preventDefault();
 
-function normalizePhone(p) {
+    if (!form.name.trim() || !form.idNo.trim()) {
+      notify("Please complete all required fields.");
+      return;
+    }
 
-  let s =
-    String(p || '')
-      .trim()
-      .replace(
-        /[\s-]/g,
-        ''
+    const totalImageBytes = Object.values(imageFiles).reduce(
+      (total, file) => total + (file?.size || 0),
+      0
+    );
+
+    if (totalImageBytes > 3.5 * 1024 * 1024) {
+      notify(
+        "Selected images total more than 3.5 MB. Upload fewer or smaller images."
+      );
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const payload = new FormData();
+
+      Object.entries(form).forEach(([key, value]) => {
+        // Don't overwrite an existing password with a blank value.
+        if (
+          key === "password" &&
+          editingId &&
+          !String(value || "").trim()
+        ) {
+          return;
+        }
+
+        payload.append(key, String(value ?? ""));
+      });
+
+      Object.entries(imageFiles).forEach(([key, file]) => {
+        if (file) {
+          payload.append(key, file);
+        }
+      });
+
+      Object.entries(removedImages).forEach(([key, removed]) => {
+        if (removed) {
+          payload.append(`remove_${key}`, "true");
+        }
+      });
+
+      const response = await fetch(
+        editingId
+          ? `${API_BASE_URL}/${encodeURIComponent(editingId)}`
+          : API_BASE_URL,
+        {
+          method: editingId ? "PUT" : "POST",
+          body: payload,
+        }
       );
 
-  if (!s) {
-    return s;
+      const data = await readApiError(response);
+      const savedItem = normalizeItem(extractItem(data));
+
+      if (!savedItem.id) {
+        throw new Error(
+          "The API response did not include the saved record ID. Check the backend response format."
+        );
+      }
+
+      if (editingId) {
+        setItems((previous) =>
+          previous.map((item) =>
+            item.id === editingId ? savedItem : item
+          )
+        );
+
+        notify("Record updated successfully in database.");
+      } else {
+        setItems((previous) => [savedItem, ...previous]);
+
+        notify("Record saved successfully to database.");
+      }
+
+      resetForm();
+    } catch (error) {
+      notify(`Save failed: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
-  /* Already international */
+  // Fill the form when editing.
+  function startEdit(item) {
+    setEditingId(item.id);
+    setOriginalImages(item.images || {});
+    setRemovedImages({});
+    setImageFiles({});
 
-  if (
-    s.startsWith('+')
-  ) {
-    return s;
+    setForm({
+      name: item.name || "",
+      idNo: item.idNo || "",
+      phone: item.phone || "",
+      // Password is intentionally not returned by a secure backend.
+      password: "",
+      passportNo: item.passportNo || "",
+      passportType: item.passportType || "",
+      passportIssueDate: item.passportIssueDate || "",
+      passportExpiryDate: item.passportExpiryDate || "",
+      passportPlaceOfIssue: item.passportPlaceOfIssue || "",
+      passportStatus: item.passportStatus || "",
+      idVersion: item.idVersion || "",
+      iqamaIssueDate: item.iqamaIssueDate || "",
+      iqamaExpiryDate: item.iqamaExpiryDate || "",
+      travelStatus: item.travelStatus || "",
+      lastTravelDestination: item.lastTravelDestination || "",
+      lastTravelDate: item.lastTravelDate || "",
+      balance: item.balance || "",
+    });
+
+    setImages(item.images || {});
+
+    document.getElementById("form-section")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
   }
 
-  /* Pakistan local number */
-
-  if (
-    /^0\d{9,10}$/.test(s)
-  ) {
-    return (
-      '+92' +
-      s.slice(1)
+  // Delete a record from the backend.
+  async function deleteRecord(item) {
+    const confirmed = window.confirm(
+      `Delete the record for "${item.name}" from the database?`
     );
-  }
 
-  /* Pakistan without + */
+    if (!confirmed) return;
 
-  if (
-    /^92\d{9,10}$/.test(s)
-  ) {
-    return '+' + s;
-  }
-
-  /* Other countries */
-
-  return s;
-}
-
-/* =====================================================
-   GET ALL PHONE FORMATS
-===================================================== */
-
-function getPhoneFormats(phone) {
-
-  const raw =
-    String(phone || '')
-      .trim()
-      .replace(
-        /[\s-]/g,
-        ''
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(item.id)}`,
+        { method: "DELETE" }
       );
 
-  const normalized =
-    normalizePhone(raw);
+      await readApiError(response);
 
-  const formats =
-    new Set();
-
-  if (raw) {
-    formats.add(raw);
-  }
-
-  if (normalized) {
-    formats.add(normalized);
-  }
-
-  /* Pakistan +92 to local 03xx */
-
-  if (
-    normalized.startsWith('+92')
-  ) {
-
-    formats.add(
-      '0' +
-      normalized.slice(3)
-    );
-  }
-
-  /* International without + */
-
-  if (
-    normalized.startsWith('+')
-  ) {
-
-    formats.add(
-      normalized.slice(1)
-    );
-  }
-
-  return [
-    ...formats,
-  ];
-}
-
-/* =====================================================
-   PHONE VALIDATION
-   Any country allowed.
-   Minimum 6 digits.
-===================================================== */
-
-function isValidMobileNumber(phone) {
-
-  const digits =
-    String(phone || '')
-      .replace(
-        /\D/g,
-        ''
+      setItems((previous) =>
+        previous.filter((record) => record.id !== item.id)
       );
+
+      if (editingId === item.id) {
+        resetForm();
+      }
+
+      notify("Record deleted from database.");
+    } catch (error) {
+      notify(`Delete failed: ${error.message}`);
+    }
+  }
+
+  // Search records.
+  const filteredItems = useMemo(() => {
+    const term = query.trim().toLowerCase();
+
+    if (!term) return items;
+
+    return items.filter((item) =>
+      [
+        item.name,
+        item.idNo,
+        item.phone,
+        item.passportNo,
+      ].some((value) =>
+        String(value || "").toLowerCase().includes(term)
+      )
+    );
+  }, [items, query]);
+
+  const recordsWithImages = items.filter((item) =>
+    IMAGE_FIELDS.some((field) => item.images?.[field.key])
+  ).length;
 
   return (
-    digits.length >= 6
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#top">
+          <div className="brand-mark">PH</div>
+
+          <div className="brand-copy">
+            <strong>PeopleHub</strong>
+            <span>People directory</span>
+          </div>
+        </a>
+
+        <div className="top-actions">
+          <label className="search-box">
+            <span className="search-icon">⌕</span>
+
+            <input
+              type="search"
+              aria-label="Search records"
+              placeholder="Search name, ID or passport..."
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+
+          <button
+            className="icon-btn"
+            type="button"
+            onClick={() =>
+              setTheme((current) =>
+                current === "light" ? "dark" : "light"
+              )
+            }
+            aria-label="Toggle theme"
+            title="Toggle theme"
+          >
+            {theme === "light" ? "☾" : "☀"}
+          </button>
+        </div>
+      </header>
+
+      <main className="container" id="top">
+        <section className="hero">
+          <div className="hero-copy">
+            <span className="hero-tag">
+              <i />
+              YOUR PERSONAL DIRECTORY
+            </span>
+
+            <h1>
+              Every record.
+              <br />
+              <em>One simple place.</em>
+            </h1>
+
+            <p>
+              Manage personal info, Passport, Resident ID (Iqama),
+              and Travel status.
+            </p>
+
+            <a className="hero-link" href="#records">
+              Explore records <span>↓</span>
+            </a>
+          </div>
+
+          <div className="hero-art" aria-hidden="true">
+            <div className="orbit orbit-one" />
+            <div className="orbit orbit-two" />
+
+            <div className="art-card art-card-back">
+              <span className="art-document">▦</span>
+              <span>DOCUMENTS</span>
+            </div>
+
+            <div className="art-card art-card-front">
+              <div className="art-avatar">✦</div>
+
+              <div className="art-lines">
+                <b />
+                <b />
+                <b />
+              </div>
+
+              <span className="art-status">● YOUR DIRECTORY</span>
+            </div>
+
+            <div className="art-dot dot-one" />
+            <div className="art-dot dot-two" />
+          </div>
+
+          <div className="hero-bottom">
+            <span>PEOPLEHUB WORKSPACE</span>
+            <span>FRONTEND ONLY · NO LOGIN</span>
+          </div>
+        </section>
+
+        {/* Statistics */}
+        <section className="stats-grid">
+          <article className="stat-card">
+            <span className="stat-icon purple">▤</span>
+
+            <div>
+              <p>Total records</p>
+              <strong>{items.length}</strong>
+            </div>
+
+            <small>All saved records</small>
+          </article>
+
+          <article className="stat-card">
+            <span className="stat-icon mint">▧</span>
+
+            <div>
+              <p>With images</p>
+              <strong>{recordsWithImages}</strong>
+            </div>
+
+            <small>Records with photos</small>
+          </article>
+
+          <article className="stat-card">
+            <span className="stat-icon amber">⌕</span>
+
+            <div>
+              <p>Search results</p>
+              <strong>{filteredItems.length}</strong>
+            </div>
+
+            <small>Matching records</small>
+          </article>
+        </section>
+
+        {/* Record form */}
+        <section className="form-card" id="form-section">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">
+                {editingId ? "UPDATE RECORD" : "ADD TO DIRECTORY"}
+              </span>
+
+              <h2>
+                {editingId
+                  ? "Edit person record"
+                  : "Create a new record"}
+              </h2>
+
+              <p>
+                Enter all fields extracted from Absher details below.
+              </p>
+            </div>
+
+            {editingId && (
+              <button
+                className="secondary-btn"
+                type="button"
+                onClick={resetForm}
+              >
+                Cancel edit ×
+              </button>
+            )}
+          </div>
+
+          <form id="record-form" onSubmit={handleSubmit}>
+            {/* Section 1 */}
+            <div
+              className="upload-heading"
+              style={{
+                marginTop: 0,
+                borderTop: 0,
+                paddingTop: 0,
+              }}
+            >
+              <div>
+                <span className="eyebrow">SECTION 1</span>
+                <h3>Personal &amp; Contact Details</h3>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <label className="field">
+                <span>
+                  Full Name <b>*</b>
+                </span>
+
+                <input
+                  name="name"
+                  value={form.name}
+                  onChange={handleChange}
+                  placeholder="Enter full name"
+                  maxLength={120}
+                  required
+                />
+              </label>
+
+              <label className="field">
+                <span>Phone Number</span>
+
+                <input
+                  type="tel"
+                  name="phone"
+                  value={form.phone}
+                  onChange={handleChange}
+                  placeholder="Enter phone number"
+                  maxLength={30}
+                />
+              </label>
+
+              <label className="field">
+                <span>Password</span>
+
+                <input
+                  type="password"
+                  name="password"
+                  value={form.password}
+                  onChange={handleChange}
+                  placeholder={
+                    editingId
+                      ? "Leave blank to keep existing password"
+                      : "Enter password"
+                  }
+                  maxLength={50}
+                  autoComplete="new-password"
+                />
+              </label>
+            </div>
+
+            {/* Section 2 */}
+            <div className="upload-heading">
+              <div>
+                <span className="eyebrow">SECTION 2</span>
+                <h3>Passport Information</h3>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <label className="field">
+                <span>Passport Number</span>
+
+                <input
+                  name="passportNo"
+                  value={form.passportNo}
+                  onChange={handleChange}
+                  placeholder="Passport Number"
+                  maxLength={30}
+                />
+              </label>
+
+              <label className="field">
+                <span>Passport Type</span>
+
+                <input
+                  name="passportType"
+                  value={form.passportType}
+                  onChange={handleChange}
+                  placeholder="Regular"
+                  maxLength={30}
+                />
+              </label>
+
+              <label className="field">
+                <span>Passport Issue Date</span>
+
+                <input
+                  name="passportIssueDate"
+                  value={form.passportIssueDate}
+                  onChange={handleChange}
+                  placeholder="DD/MM/YYYY"
+                  maxLength={20}
+                />
+              </label>
+
+              <label className="field">
+                <span>Passport Expiry Date</span>
+
+                <input
+                  name="passportExpiryDate"
+                  value={form.passportExpiryDate}
+                  onChange={handleChange}
+                  placeholder="DD/MM/YYYY"
+                  maxLength={20}
+                />
+              </label>
+
+              <label className="field">
+                <span>Place of Issue</span>
+
+                <input
+                  name="passportPlaceOfIssue"
+                  value={form.passportPlaceOfIssue}
+                  onChange={handleChange}
+                  placeholder="Pakistan"
+                  maxLength={50}
+                />
+              </label>
+
+              <label className="field">
+                <span>Passport Status</span>
+
+                <input
+                  name="passportStatus"
+                  value={form.passportStatus}
+                  onChange={handleChange}
+                  placeholder="Valid"
+                  maxLength={30}
+                />
+              </label>
+            </div>
+
+            {/* Section 3 */}
+            <div className="upload-heading">
+              <div>
+                <span className="eyebrow">SECTION 3</span>
+                <h3>Resident ID (Iqama) Details</h3>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <label className="field">
+                <span>
+                  Iqama Number <b>*</b>
+                </span>
+
+                <input
+                  name="idNo"
+                  value={form.idNo}
+                  onChange={handleChange}
+                  placeholder="Iqama Number"
+                  maxLength={80}
+                  required
+                />
+              </label>
+
+              <label className="field">
+                <span>ID Version</span>
+
+                <input
+                  name="idVersion"
+                  value={form.idVersion}
+                  onChange={handleChange}
+                  placeholder="2"
+                  maxLength={10}
+                />
+              </label>
+
+              <label className="field">
+                <span>Iqama Issue Date</span>
+
+                <input
+                  name="iqamaIssueDate"
+                  value={form.iqamaIssueDate}
+                  onChange={handleChange}
+                  placeholder="DD/MM/YYYY"
+                  maxLength={20}
+                />
+              </label>
+
+              <label className="field">
+                <span>Iqama Expiry Date</span>
+
+                <input
+                  name="iqamaExpiryDate"
+                  value={form.iqamaExpiryDate}
+                  onChange={handleChange}
+                  placeholder="DD/MM/YYYY"
+                  maxLength={20}
+                />
+              </label>
+            </div>
+
+            {/* Section 4 */}
+            <div className="upload-heading">
+              <div>
+                <span className="eyebrow">SECTION 4</span>
+                <h3>Travel Record &amp; Status</h3>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <label className="field">
+                <span>Travel Status</span>
+
+                <input
+                  name="travelStatus"
+                  value={form.travelStatus}
+                  onChange={handleChange}
+                  placeholder="Inside the Kingdom"
+                  maxLength={50}
+                />
+              </label>
+
+              <label className="field">
+                <span>Last Travel Destination</span>
+
+                <input
+                  name="lastTravelDestination"
+                  value={form.lastTravelDestination}
+                  onChange={handleChange}
+                  placeholder="Pakistan"
+                  maxLength={50}
+                />
+              </label>
+
+              <label className="field">
+                <span>Last Travel Date</span>
+
+                <input
+                  name="lastTravelDate"
+                  value={form.lastTravelDate}
+                  onChange={handleChange}
+                  placeholder="DD/MM/YYYY"
+                  maxLength={20}
+                />
+              </label>
+
+              <label className="field">
+                <span>Operations Balance</span>
+
+                <input
+                  name="balance"
+                  value={form.balance}
+                  onChange={handleChange}
+                  placeholder="0.00 SAR"
+                  maxLength={30}
+                />
+              </label>
+            </div>
+
+            {/* Section 5: Images */}
+            <div className="upload-heading">
+              <div>
+                <span className="eyebrow">SECTION 5</span>
+                <h3>Photos &amp; Documents</h3>
+              </div>
+
+              <span className="file-limit">
+                JPG, PNG, WEBP · Max 1.5 MB each · Saved to Cloudinary
+              </span>
+            </div>
+
+            <div className="upload-grid">
+              {IMAGE_FIELDS.map((field) => (
+                <div className="upload-field" key={field.key}>
+                  <div className="upload-label">
+                    <span>{field.icon}</span>
+                    <b>{field.label}</b>
+                  </div>
+
+                  {images[field.key] ? (
+                    <div className="preview-card">
+                      <img
+                        src={images[field.key]}
+                        alt={`${field.label} preview`}
+                      />
+
+                      <button
+                        className="remove-image"
+                        type="button"
+                        onClick={() => removeImage(field.key)}
+                        aria-label={`Remove ${field.label}`}
+                      >
+                        ×
+                      </button>
+
+                      <label
+                        className="replace-link"
+                        htmlFor={`image-${field.key}`}
+                      >
+                        Replace image
+                      </label>
+
+                      <input
+                        className="hidden-file-input"
+                        id={`image-${field.key}`}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(event) =>
+                          handleImage(event, field.key)
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <label className="upload-drop">
+                      <input
+                        id={`image-${field.key}`}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(event) =>
+                          handleImage(event, field.key)
+                        }
+                      />
+
+                      <span className="upload-plus">＋</span>
+                      <b>Upload {field.label.toLowerCase()}</b>
+                      <small>Choose an image from your device</small>
+                    </label>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="form-footer">
+              <span className="required-note">
+                <b>*</b> Required fields
+              </span>
+
+              <div className="footer-actions">
+                {editingId && (
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={resetForm}
+                  >
+                    Discard changes
+                  </button>
+                )}
+
+                <button
+                  className="primary-btn"
+                  type="submit"
+                  disabled={saving}
+                >
+                  {saving
+                    ? "Saving..."
+                    : editingId
+                    ? "Save changes →"
+                    : "Save record →"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        {/* Records list */}
+        <section className="records-section" id="records">
+          <div className="section-heading records-heading">
+            <div>
+              <span className="eyebrow">YOUR DIRECTORY</span>
+
+              <h2>
+                People records{" "}
+                <span className="count-pill">
+                  {filteredItems.length}
+                </span>
+              </h2>
+
+              <p>View, edit or remove your saved records.</p>
+            </div>
+
+            <button
+              className="secondary-btn"
+              type="button"
+              onClick={() => {
+                resetForm();
+
+                document
+                  .getElementById("form-section")
+                  ?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
+              ＋ Add record
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="empty-state">
+              <h3>Loading records…</h3>
+              <p>Connecting to the Absher database.</p>
+            </div>
+          ) : filteredItems.length === 0 ? (
+            <div className="empty-state">
+              <div>⌕</div>
+
+              <h3>
+                {query
+                  ? "No matching records"
+                  : "Your directory is ready"}
+              </h3>
+
+              <p>
+                {query
+                  ? "Try another name, ID number or passport number."
+                  : "Add your first record using the form above."}
+              </p>
+            </div>
+          ) : (
+            <div className="records-grid">
+              {filteredItems.map((item) => (
+                <article className="person-card" key={item.id}>
+                  <div className="person-card-head">
+                    <div className="person-avatar">
+                      {item.images?.userImage ? (
+                        <img
+                          src={item.images.userImage}
+                          alt={item.name}
+                        />
+                      ) : (
+                        <span>
+                          {(item.name || "?")
+                            .trim()
+                            .charAt(0)
+                            .toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="person-title">
+                      <h3>{item.name}</h3>
+                      <span className="record-id">
+                        Iqama · {item.idNo || "—"}
+                      </span>
+                    </div>
+
+                    <span className="local-chip">● Server</span>
+                  </div>
+
+                  <div className="person-meta">
+                    <div>
+                      <span>PHONE &amp; PASSWORD</span>
+
+                      <b>
+                        {item.phone || "—"} /{" "}
+                        {item.password ? "••••" : "—"}
+                      </b>
+                    </div>
+
+                    <div>
+                      <span>PASSPORT NO.</span>
+                      <b>{item.passportNo || "—"}</b>
+                    </div>
+                  </div>
+
+                  <div
+                    className="person-meta"
+                    style={{ marginTop: "8px" }}
+                  >
+                    <div>
+                      <span>IQAMA EXPIRY</span>
+                      <b>{item.iqamaExpiryDate || "—"}</b>
+                    </div>
+
+                    <div>
+                      <span>TRAVEL STATUS</span>
+                      <b>{item.travelStatus || "—"}</b>
+                    </div>
+                  </div>
+
+                  <div
+                    className="document-strip"
+                    style={{ marginTop: "15px" }}
+                  >
+                    {IMAGE_FIELDS.map((field) => (
+                      <div
+                        className={`document-thumb ${
+                          item.images?.[field.key] ? "has-image" : ""
+                        }`}
+                        key={field.key}
+                        title={field.label}
+                      >
+                        {item.images?.[field.key] ? (
+                          <img
+                            src={item.images[field.key]}
+                            alt={field.label}
+                          />
+                        ) : (
+                          <span>{field.icon}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="person-actions">
+                    <button
+                      className="edit-action"
+                      type="button"
+                      onClick={() => startEdit(item)}
+                    >
+                      ✎ Edit record
+                    </button>
+
+                    <button
+                      className="delete-action"
+                      type="button"
+                      onClick={() => deleteRecord(item)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <footer className="page-footer">
+          <span>PEOPLEHUB · DATABASE EDITION</span>
+
+          <span>
+            Records are loaded and saved through the Absher backend API.
+          </span>
+        </footer>
+      </main>
+
+      {toast && (
+        <div className="toast" role="status">
+          <span>✓</span>
+          {toast}
+        </div>
+      )}
+    </div>
   );
 }
-
-/* =====================================================
-   ERROR HELPER
-===================================================== */
-
-function fail(
-  res,
-  code,
-  message
-) {
-
-  return res
-    .status(code)
-    .json({
-      success: false,
-      message,
-    });
-}
-
-/* =====================================================
-   HOME
-===================================================== */
-
-app.get(
-  '/',
-  (req, res) => {
-
-    res.json({
-      success: true,
-      message:
-        'Abshar API is running',
-    });
-  }
-);
-
-/* =====================================================
-   HEALTH
-===================================================== */
-
-app.get(
-  '/api/health',
-  (req, res) => {
-
-    res.json({
-      success: true,
-      message:
-        'Server is running',
-
-      mongodb:
-        mongoose.connection
-          .readyState === 1,
-
-      database:
-        mongoose.connection.name ||
-        null,
-    });
-  }
-);
-
-/* =====================================================
-   REGISTER
-   COLLECTION: items
-===================================================== */
-
-app.post(
-  '/api/register',
-  async (req, res) => {
-
-    try {
-
-      const rawPhone =
-        String(
-          req.body.phone || ''
-        ).trim();
-
-      const password =
-        String(
-          req.body.password || ''
-        );
-
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '         📝 REGISTER REQUEST'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '📱 Phone:',
-        rawPhone
-      );
-
-      console.log(
-        '👤 Name:',
-        req.body.name
-      );
-
-      console.log(
-        '🪪 ID NO:',
-        req.body.idNo ||
-        req.body.cnic
-      );
-
-      console.log(
-        '🖼️ User Image:',
-        req.body.userImageUrl ||
-        req.body.imageUrl
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      /* Mobile validation */
-
-      if (
-        !isValidMobileNumber(
-          rawPhone
-        )
-      ) {
-
-        return fail(
-          res,
-          400,
-          'Invalid mobile number'
-        );
-      }
-
-      /* Password validation */
-
-      if (
-        password.length < 6
-      ) {
-
-        return fail(
-          res,
-          400,
-          'Password kam se kam 6 characters ka rakho'
-        );
-      }
-
-      const phoneFormats =
-        getPhoneFormats(
-          rawPhone
-        );
-
-      console.log(
-        '📱 Phone Formats:',
-        phoneFormats
-      );
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      const existing =
-        await itemsCollection.findOne(
-          {
-            phone: {
-              $in:
-                phoneFormats,
-            },
-          }
-        );
-
-      if (existing) {
-
-        console.log(
-          '❌ REGISTER FAILED: Number already exists'
-        );
-
-        return fail(
-          res,
-          409,
-          'Ye number already registered hai'
-        );
-      }
-
-      /* ==========================================
-         PASSWORD HASH
-      ========================================== */
-
-      const hashedPassword =
-        await bcrypt.hash(
-          password,
-          10
-        );
-
-      /* ==========================================
-         NEW USER
-      ========================================== */
-
-      const newUser = {
-
-        name:
-          String(
-            req.body.name ||
-            'User'
-          ),
-
-        idNo:
-          String(
-            req.body.idNo ||
-            req.body.cnic ||
-            ''
-          ),
-
-        phone:
-          normalizePhone(
-            rawPhone
-          ),
-
-        password:
-          hashedPassword,
-
-        /* User profile image */
-
-        userImageUrl:
-          String(
-            req.body.userImageUrl ||
-            req.body.imageUrl ||
-            ''
-          ),
-
-        /* Iqama image */
-
-        iqamaImageUrl:
-          String(
-            req.body.iqamaImageUrl ||
-            ''
-          ),
-
-        /* QR Code 1 */
-
-        qrCode1Url:
-          String(
-            req.body.qrCode1Url ||
-            ''
-          ),
-
-        /* Driving License */
-
-        drivingLicenseImageUrl:
-          String(
-            req.body.drivingLicenseImageUrl ||
-            ''
-          ),
-
-        /* QR Code 2 */
-
-        qrCode2Url:
-          String(
-            req.body.qrCode2Url ||
-            ''
-          ),
-
-        /* Card image */
-
-        cardImageUrl:
-          String(
-            req.body.cardImageUrl ||
-            ''
-          ),
-
-        userImagePublicId:
-          String(
-            req.body.userImagePublicId ||
-            ''
-          ),
-
-        cardImagePublicId:
-          String(
-            req.body.cardImagePublicId ||
-            ''
-          ),
-
-        createdAt:
-          new Date(),
-
-        updatedAt:
-          new Date(),
-      };
-
-      console.log('\n');
-
-      console.log(
-        '========== DATA SAVING TO MONGODB =========='
-      );
-
-      console.log(
-        JSON.stringify(
-          {
-            ...newUser,
-            password:
-              '********',
-          },
-          null,
-          2
-        )
-      );
-
-      console.log(
-        '============================================='
-      );
-
-      const result =
-        await itemsCollection.insertOne(
-          newUser
-        );
-
-      console.log(
-        '✅ USER INSERTED'
-      );
-
-      console.log(
-        '🆔 MongoDB ID:',
-        result.insertedId.toString()
-      );
-
-      return res.json({
-
-        success:
-          true,
-
-        message:
-          'Successfully registered! Ab login karo.',
-
-        userId:
-          String(
-            result.insertedId
-          ),
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ REGISTER ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        500,
-        'Registration failed'
-      );
-    }
-  }
-);
-
-/* =====================================================
-   LOGIN
-===================================================== */
-
-app.post(
-  '/api/login',
-  async (req, res) => {
-
-    try {
-
-      const rawPhone =
-        String(
-          req.body.phone || ''
-        ).trim();
-
-      const password =
-        String(
-          req.body.password || ''
-        );
-
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '             🔐 LOGIN REQUEST'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '📱 Requested Phone:',
-        rawPhone
-      );
-
-      console.log(
-        '🔑 Password Received:',
-        password
-          ? 'YES'
-          : 'NO'
-      );
-
-      /* Mobile validation */
-
-      if (
-        !isValidMobileNumber(
-          rawPhone
-        )
-      ) {
-
-        return fail(
-          res,
-          400,
-          'Invalid mobile number'
-        );
-      }
-
-      /* Password validation */
-
-      if (!password) {
-
-        return fail(
-          res,
-          400,
-          'Password required'
-        );
-      }
-
-      const normalizedPhone =
-        normalizePhone(
-          rawPhone
-        );
-
-      const phoneFormats =
-        getPhoneFormats(
-          rawPhone
-        );
-
-      console.log(
-        '📱 Normalized Phone:',
-        normalizedPhone
-      );
-
-      console.log(
-        '📱 Phone Formats:',
-        phoneFormats
-      );
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      /* ==========================================
-         FIND USER BY PHONE
-      ========================================== */
-
-      const item =
-        await itemsCollection.findOne(
-          {
-            phone: {
-              $in:
-                phoneFormats,
-            },
-          }
-        );
-
-      /* ==========================================
-         SHOW MONGODB LOGIN DATA
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '========== MONGODB LOGIN RESULT =========='
-      );
-
-      if (item) {
-
-        console.log(
-          '✅ USER FOUND IN MONGODB'
-        );
-
-        console.log(
-          JSON.stringify(
-            {
-              _id:
-                item._id,
-
-              name:
-                item.name,
-
-              idNo:
-                item.idNo,
-
-              phone:
-                item.phone,
-
-              userImageUrl:
-                item.userImageUrl,
-
-              iqamaImageUrl:
-                item.iqamaImageUrl,
-
-              qrCode1Url:
-                item.qrCode1Url,
-
-              drivingLicenseImageUrl:
-                item.drivingLicenseImageUrl,
-
-              qrCode2Url:
-                item.qrCode2Url,
-
-              cardImageUrl:
-                item.cardImageUrl,
-
-              userImagePublicId:
-                item.userImagePublicId,
-
-              cardImagePublicId:
-                item.cardImagePublicId,
-
-              createdAt:
-                item.createdAt,
-
-              updatedAt:
-                item.updatedAt,
-            },
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND IN MONGODB'
-        );
-
-        console.log(
-          'Searched Phone Formats:',
-          phoneFormats
-        );
-      }
-
-      console.log(
-        '=========================================='
-      );
-
-      if (!item) {
-
-        return fail(
-          res,
-          401,
-          'Invalid mobile number or password'
-        );
-      }
-
-      /* ==========================================
-         PASSWORD CHECK
-      ========================================== */
-
-      let passwordCorrect =
-        false;
-
-      /* New bcrypt password */
-
-      if (
-        item.password &&
-        String(
-          item.password
-        ).startsWith('$2')
-      ) {
-
-        passwordCorrect =
-          await bcrypt.compare(
-            password,
-            item.password
-          );
-
-      } else {
-
-        /*
-          Temporary support for old
-          plaintext passwords.
-        */
-
-        passwordCorrect =
-          password ===
-          String(
-            item.password || ''
-          );
-      }
-
-      if (!passwordCorrect) {
-
-        console.log(
-          '❌ PASSWORD INCORRECT'
-        );
-
-        return fail(
-          res,
-          401,
-          'Invalid mobile number or password'
-        );
-      }
-
-      console.log(
-        '✅ PASSWORD CORRECT'
-      );
-
-      /* ==========================================
-         OTP COOLDOWN
-      ========================================== */
-
-      const resend =
-        otpService.canResend(
-          normalizedPhone,
-          COOLDOWN_MS
-        );
-
-      if (!resend.ok) {
-
-        console.log(
-          '⏳ OTP COOLDOWN:',
-          Math.ceil(
-            resend.waitMs /
-            1000
-          ),
-          'seconds'
-        );
-
-        return fail(
-          res,
-          429,
-          `Naya OTP lane se pehle ${Math.ceil(
-            resend.waitMs / 1000
-          )}s ruko`
-        );
-      }
-
-      /* ==========================================
-         ISSUE OTP
-      ========================================== */
-
-      const otp =
-        otpService.issueOtp(
-          normalizedPhone,
-          OTP_TTL,
-          MAX_ATTEMPTS
-        );
-
-      console.log(
-        `[OTP] ${normalizedPhone}: ${otp}`
-      );
-
-      console.log(
-        '========================================\n'
-      );
-
-      return res.json({
-
-        success:
-          true,
-
-        message:
-          'Login successful',
-
-        otp,
-
-        expiresIn:
-          OTP_TTL,
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ LOGIN ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        500,
-        'Server/MongoDB error'
-      );
-    }
-  }
-);
-
-/* =====================================================
-   VERIFY OTP
-===================================================== */
-
-app.post(
-  '/api/verify-otp',
-  async (req, res) => {
-
-    try {
-
-      const phone =
-        normalizePhone(
-          req.body.phone
-        );
-
-      const otp =
-        String(
-          req.body.otp || ''
-        ).trim();
-
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '          🔢 VERIFY OTP REQUEST'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '📱 Phone:',
-        phone
-      );
-
-      console.log(
-        '🔢 OTP:',
-        otp
-      );
-
-      /* ==========================================
-         MOBILE VALIDATION
-         Any country
-         Minimum 6 digits
-      ========================================== */
-
-      if (
-        !isValidMobileNumber(
-          phone
-        )
-      ) {
-
-        return fail(
-          res,
-          400,
-          'Invalid mobile number'
-        );
-      }
-
-      /* ==========================================
-         OTP VALIDATION
-      ========================================== */
-
-      if (
-        !/^\d{4}$/.test(
-          otp
-        )
-      ) {
-
-        return fail(
-          res,
-          400,
-          'OTP 4 digits ka hona chahiye'
-        );
-      }
-
-      /* ==========================================
-         VERIFY OTP
-      ========================================== */
-
-      const result =
-        otpService.verifyOtp(
-          phone,
-          otp
-        );
-
-      console.log(
-        '🔐 OTP Result:',
-        result
-      );
-
-      if (!result.ok) {
-
-        const reasons = {
-
-          no_otp:
-            'Is number ke liye koi OTP issue nahi hua',
-
-          no_orphan:
-            'Is number ke liye koi OTP issue nahi hua',
-
-          expired:
-            'OTP expire ho gaya. Dobara login karo.',
-
-          locked:
-            'Bahut zyada galat attempts. Dobara login karke naya OTP lo.',
-
-          wrong:
-            `OTP galat hai. ${
-              result.attemptsLeft ?? 0
-            } attempts baqi hain.`,
-        };
-
-        return fail(
-          res,
-          401,
-          reasons[
-            result.reason
-          ] ||
-            'OTP verification failed'
-        );
-      }
-
-      /* ==========================================
-         PHONE FORMATS
-      ========================================== */
-
-      const phoneFormats =
-        getPhoneFormats(
-          phone
-        );
-
-      console.log(
-        '📱 Phone Formats:',
-        phoneFormats
-      );
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      /* ==========================================
-         FIND USER
-      ========================================== */
-
-      const user =
-        await itemsCollection.findOne(
-          {
-            phone: {
-              $in:
-                phoneFormats,
-            },
-          }
-        );
-
-      /* ==========================================
-         MONGODB USER AFTER OTP
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '====== MONGODB USER AFTER OTP ======'
-      );
-
-      if (user) {
-
-        console.log(
-          '✅ USER FOUND AFTER OTP'
-        );
-
-        console.log(
-          JSON.stringify(
-            {
-              _id:
-                user._id,
-
-              name:
-                user.name,
-
-              idNo:
-                user.idNo,
-
-              phone:
-                user.phone,
-
-              userImageUrl:
-                user.userImageUrl,
-
-              iqamaImageUrl:
-                user.iqamaImageUrl,
-
-              qrCode1Url:
-                user.qrCode1Url,
-
-              drivingLicenseImageUrl:
-                user.drivingLicenseImageUrl,
-
-              qrCode2Url:
-                user.qrCode2Url,
-
-              cardImageUrl:
-                user.cardImageUrl,
-
-              userImagePublicId:
-                user.userImagePublicId,
-
-              cardImagePublicId:
-                user.cardImagePublicId,
-
-              createdAt:
-                user.createdAt,
-
-              updatedAt:
-                user.updatedAt,
-            },
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND AFTER OTP'
-        );
-      }
-
-      console.log(
-        '===================================='
-      );
-
-      if (!user) {
-
-        return fail(
-          res,
-          404,
-          'User MongoDB me nahi mila'
-        );
-      }
-
-      /* ==========================================
-         JWT
-      ========================================== */
-
-      const token =
-        jwt.sign(
-          {
-            userId:
-              String(
-                user._id
-              ),
-
-            phone:
-              user.phone,
-          },
-
-          JWT_SECRET,
-
-          {
-            expiresIn:
-              '7d',
-          }
-        );
-
-      console.log(
-        '✅ JWT TOKEN CREATED'
-      );
-
-      return res.json({
-
-        success:
-          true,
-
-        message:
-          'OTP verified successfully',
-
-        token,
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ VERIFY OTP ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        500,
-        'OTP verification failed'
-      );
-    }
-  }
-);
-
-/* =====================================================
-   GET CURRENT USER
-   /api/me
-===================================================== */
-
-app.get(
-  '/api/me',
-  async (req, res) => {
-
-    try {
-
-      console.log('\n');
-
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        '              👤 /api/me'
-      );
-
-      console.log(
-        '========================================'
-      );
-
-      const authHeader =
-        req.headers.authorization ||
-        '';
-
-      if (
-        !authHeader.startsWith(
-          'Bearer '
-        )
-      ) {
-
-        console.log(
-          '❌ Authorization token missing'
-        );
-
-        return fail(
-          res,
-          401,
-          'Authorization token required'
-        );
-      }
-
-      const token =
-        authHeader
-          .replace(
-            'Bearer ',
-            ''
-          )
-          .trim();
-
-      console.log(
-        '🔑 Authorization token received'
-      );
-
-      /* ==========================================
-         VERIFY JWT
-      ========================================== */
-
-      const decoded =
-        jwt.verify(
-          token,
-          JWT_SECRET
-        );
-
-      console.log(
-        '✅ JWT DECODED:'
-      );
-
-      console.log(
-        JSON.stringify(
-          decoded,
-          null,
-          2
-        )
-      );
-
-      const itemsCollection =
-        mongoose.connection.collection(
-          'items'
-        );
-
-      let user =
-        null;
-
-      /* ==========================================
-         FIND BY MONGODB ID
-      ========================================== */
-
-      if (
-        decoded.userId
-      ) {
-
-        try {
-
-          user =
-            await itemsCollection.findOne(
-              {
-                _id:
-                  new mongoose.Types.ObjectId(
-                    decoded.userId
-                  ),
-              }
-            );
-
-          console.log(
-            '🔎 MongoDB ID Search:',
-            decoded.userId
-          );
-
-        } catch (
-          idError
-        ) {
-
-          console.log(
-            '❌ ID LOOKUP ERROR:',
-            idError.message
-          );
-        }
-      }
-
-      /* ==========================================
-         FALLBACK PHONE SEARCH
-      ========================================== */
-
-      if (
-        !user &&
-        decoded.phone
-      ) {
-
-        const phoneFormats =
-          getPhoneFormats(
-            decoded.phone
-          );
-
-        console.log(
-          '🔎 Fallback Phone Search:',
-          phoneFormats
-        );
-
-        user =
-          await itemsCollection.findOne(
-            {
-              phone: {
-                $in:
-                  phoneFormats,
-              },
-            }
-          );
-      }
-
-      /* ==========================================
-         SHOW RAW MONGODB DATA
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '========== RAW MONGODB USER =========='
-      );
-
-      if (user) {
-
-        console.log(
-          '✅ USER FOUND IN MONGODB'
-        );
-
-        console.log(
-          JSON.stringify(
-            user,
-            null,
-            2
-          )
-        );
-
-      } else {
-
-        console.log(
-          '❌ USER NOT FOUND IN MONGODB'
-        );
-      }
-
-      console.log(
-        '======================================='
-      );
-
-      if (!user) {
-
-        return fail(
-          res,
-          404,
-          'User MongoDB me nahi mila'
-        );
-      }
-
-      /* ==========================================
-         SAFE USER DATA
-      ========================================== */
-
-      const safeUser = {
-
-        id:
-          String(
-            user._id
-          ),
-
-        name:
-          user.name || '',
-
-        idNo:
-          user.idNo || '',
-
-        phone:
-          user.phone || '',
-
-        /* Profile */
-
-        userImageUrl:
-          user.userImageUrl || '',
-
-        /* Iqama */
-
-        iqamaImageUrl:
-          user.iqamaImageUrl || '',
-
-        /* QR Code 1 */
-
-        qrCode1Url:
-          user.qrCode1Url || '',
-
-        /* Driving License */
-
-        drivingLicenseImageUrl:
-          user.drivingLicenseImageUrl || '',
-
-        /* QR Code 2 */
-
-        qrCode2Url:
-          user.qrCode2Url || '',
-
-        /* Card */
-
-        cardImageUrl:
-          user.cardImageUrl || '',
-
-        /* Cloudinary IDs */
-
-        userImagePublicId:
-          user.userImagePublicId || '',
-
-        cardImagePublicId:
-          user.cardImagePublicId || '',
-
-        createdAt:
-          user.createdAt ||
-          null,
-
-        updatedAt:
-          user.updatedAt ||
-          null,
-      };
-
-      /* ==========================================
-         DATA SENT TO APP
-      ========================================== */
-
-      console.log('\n');
-
-      console.log(
-        '========== 📦 DATA SENT TO APP =========='
-      );
-
-      console.log(
-        JSON.stringify(
-          safeUser,
-          null,
-          2
-        )
-      );
-
-      console.log(
-        '=========================================='
-      );
-
-      console.log(
-        '🖼️ USER IMAGE URL:',
-        safeUser.userImageUrl
-      );
-
-      console.log(
-        '🪪 IQAMA IMAGE URL:',
-        safeUser.iqamaImageUrl
-      );
-
-      console.log(
-        '🔳 QR CODE 1 URL:',
-        safeUser.qrCode1Url
-      );
-
-      console.log(
-        '🚗 DRIVING LICENSE URL:',
-        safeUser.drivingLicenseImageUrl
-      );
-
-      console.log(
-        '🔳 QR CODE 2 URL:',
-        safeUser.qrCode2Url
-      );
-
-      console.log(
-        '🪪 CARD IMAGE URL:',
-        safeUser.cardImageUrl
-      );
-
-      console.log(
-        '👤 NAME:',
-        safeUser.name
-      );
-
-      console.log(
-        '🆔 ID NO:',
-        safeUser.idNo
-      );
-
-      console.log(
-        '📱 PHONE:',
-        safeUser.phone
-      );
-
-      console.log(
-        '========================================\n'
-      );
-
-      return res.json({
-
-        success:
-          true,
-
-        user:
-          safeUser,
-      });
-
-    } catch (e) {
-
-      console.error(
-        '❌ ME ERROR:',
-        e
-      );
-
-      return fail(
-        res,
-        401,
-        'Token invalid ya expired hai'
-      );
-    }
-  }
-);
-
-/* =====================================================
-   MONGOOSE CONNECTION EVENTS
-===================================================== */
-
-mongoose.connection.on(
-  'connected',
-  () => {
-
-    console.log(
-      '[MONGODB] Connected'
-    );
-  }
-);
-
-mongoose.connection.on(
-  'error',
-  (error) => {
-
-    console.error(
-      '[MONGODB] Error:',
-      error.message
-    );
-  }
-);
-
-mongoose.connection.on(
-  'disconnected',
-  () => {
-
-    console.log(
-      '[MONGODB] Disconnected'
-    );
-  }
-);
-
-/* =====================================================
-   SERVERLESS EXPORT
-===================================================== */
-
-module.exports = app;
-
-/* =====================================================
-   LOCAL DEVELOPMENT
-===================================================== */
-
-if (
-  require.main === module
-) {
-
-  connectDB()
-
-    .then(
-      () => {
-
-        app.listen(
-          PORT,
-          '0.0.0.0',
-          () => {
-
-            console.log(
-              `[OK] Server running on http://0.0.0.0:${PORT}`
-            );
-
-            console.log(
-              `[OK] API: http://localhost:${PORT}`
-            );
-
-            console.log(
-              `[OK] /api/me ready`
-            );
-
-          }
-        );
-
-      }
-    )
-
-    .catch(
-      (err) => {
-
-        console.error(
-          '[DB ERROR] Connection failed:',
-          err.message
-        );
-
-        process.exit(
-          1
-        );
-      }
-    );
-}
-
