@@ -6,7 +6,7 @@ const SECRET =
   'dev-otp-secret-change-me';
 
 /*
-  phone ->
+  idNo ->
   {
     otp,
     hash,
@@ -20,21 +20,39 @@ const SECRET =
 const store = new Map();
 
 /* =====================================================
+   NORMALIZE ID NO
+===================================================== */
+
+function normalizeIdNo(idNo) {
+
+  return String(
+    idNo || ''
+  )
+    .trim()
+    .replace(
+      /[\s-]/g,
+      ''
+    )
+    .toUpperCase();
+}
+
+/* =====================================================
    HMAC
 ===================================================== */
 
 function hmac(
-  phone,
+  idNo,
   otp,
   expiresAt
 ) {
+
   return crypto
     .createHmac(
       'sha256',
       SECRET
     )
     .update(
-      `${phone}:${otp}:${expiresAt}`
+      `${idNo}:${otp}:${expiresAt}`
     )
     .digest('hex');
 }
@@ -44,19 +62,30 @@ function hmac(
 ===================================================== */
 
 function issueOtp(
-  phone,
+  idNo,
   ttlSeconds = 300,
   maxAttempts = 3
 ) {
+
+  const key =
+    normalizeIdNo(
+      idNo
+    );
+
   /*
-    Generate exactly 4 digits.
+    Exactly 4 digits
   */
-  const otp = String(
-    crypto.randomInt(
-      0,
-      10000
-    )
-  ).padStart(4, '0');
+
+  const otp =
+    String(
+      crypto.randomInt(
+        0,
+        10000
+      )
+    ).padStart(
+      4,
+      '0'
+    );
 
   const expiresAt =
     Date.now() +
@@ -67,18 +96,20 @@ function issueOtp(
 
   const hash =
     hmac(
-      phone,
+      key,
       otp,
       expiresAt
     );
 
   store.set(
-    phone,
+    key,
     {
+
       /*
-        Temporary plain OTP is kept only
-        so we can debug the local OTP flow.
+        Local debugging ke liye
+        plain OTP temporarily stored.
       */
+
       otp,
 
       hash,
@@ -97,32 +128,34 @@ function issueOtp(
   console.log(
     '========================================'
   );
+
   console.log(
-    'OTP ISSUED'
+    '🔐 OTP ISSUED'
   );
+
   console.log(
     '========================================'
   );
 
   console.log(
-    'PHONE:',
-    phone
+    '🪪 ID NO:',
+    key
   );
 
   console.log(
-    'OTP:',
+    '🔢 OTP:',
     otp
   );
 
   console.log(
-    'EXPIRES:',
+    '⏰ EXPIRES:',
     new Date(
       expiresAt
     ).toISOString()
   );
 
   console.log(
-    'STORE SIZE:',
+    '📦 STORE SIZE:',
     store.size
   );
 
@@ -138,16 +171,26 @@ function issueOtp(
 ===================================================== */
 
 function canResend(
-  phone,
+  idNo,
   cooldownMs = 60000
 ) {
+
+  const key =
+    normalizeIdNo(
+      idNo
+    );
+
   const rec =
-    store.get(phone);
+    store.get(
+      key
+    );
 
   /*
     No previous OTP
   */
+
   if (!rec) {
+
     return {
       ok: true,
       waitMs: 0,
@@ -161,7 +204,10 @@ function canResend(
       rec.lastSentAt
     );
 
-  if (waitMs > 0) {
+  if (
+    waitMs > 0
+  ) {
+
     return {
       ok: false,
       waitMs,
@@ -179,37 +225,49 @@ function canResend(
 ===================================================== */
 
 function verifyOtp(
-  phone,
+  idNo,
   otp
 ) {
+
+  const key =
+    normalizeIdNo(
+      idNo
+    );
+
   console.log('');
   console.log(
     '========================================'
   );
+
   console.log(
-    'OTP SERVICE VERIFY'
+    '🔐 OTP SERVICE VERIFY'
   );
+
   console.log(
     '========================================'
   );
 
   console.log(
-    'PHONE:',
-    phone
+    '🪪 ID NO:',
+    key
   );
 
   console.log(
-    'OTP RECEIVED:',
+    '🔢 OTP RECEIVED:',
     otp
   );
 
   const rec =
-    store.get(phone);
+    store.get(
+      key
+    );
 
-  /*
-    No OTP found
-  */
+  /* ==========================================
+     NO OTP
+  ========================================== */
+
   if (!rec) {
+
     console.log(
       '❌ NO OTP RECORD'
     );
@@ -242,18 +300,22 @@ function verifyOtp(
     ).toISOString()
   );
 
-  /*
-    Expired
-  */
+  /* ==========================================
+     EXPIRED
+  ========================================== */
+
   if (
     Date.now() >
     rec.expiresAt
   ) {
+
     console.log(
       '❌ OTP EXPIRED'
     );
 
-    store.delete(phone);
+    store.delete(
+      key
+    );
 
     return {
       ok: false,
@@ -261,18 +323,22 @@ function verifyOtp(
     };
   }
 
-  /*
-    Too many attempts
-  */
+  /* ==========================================
+     LOCKED
+  ========================================== */
+
   if (
     rec.attempts >=
     rec.maxAttempts
   ) {
+
     console.log(
       '❌ OTP LOCKED'
     );
 
-    store.delete(phone);
+    store.delete(
+      key
+    );
 
     return {
       ok: false,
@@ -280,9 +346,10 @@ function verifyOtp(
     };
   }
 
-  /*
-    Normalize received OTP
-  */
+  /* ==========================================
+     NORMALIZE OTP
+  ========================================== */
+
   const receivedOtp =
     String(
       otp || ''
@@ -293,16 +360,15 @@ function verifyOtp(
         ''
       );
 
-  /*
-    Compare directly first.
+  /* ==========================================
+     DIRECT OTP CHECK
+  ========================================== */
 
-    This makes the local OTP flow
-    reliable.
-  */
   if (
     receivedOtp !==
     rec.otp
   ) {
+
     console.log(
       '❌ OTP DOES NOT MATCH'
     );
@@ -320,29 +386,33 @@ function verifyOtp(
     rec.attempts += 1;
 
     store.set(
-      phone,
+      key,
       rec
     );
 
     return {
+
       ok: false,
-      reason: 'wrong',
+
+      reason:
+        'wrong',
+
       attemptsLeft:
         Math.max(
           0,
           rec.maxAttempts -
-            rec.attempts
+          rec.attempts
         ),
     };
   }
 
-  /*
-    HMAC verification as an additional
-    integrity check.
-  */
+  /* ==========================================
+     HMAC CHECK
+  ========================================== */
+
   const expectedHash =
     hmac(
-      phone,
+      key,
       rec.otp,
       rec.expiresAt
     );
@@ -351,11 +421,14 @@ function verifyOtp(
     expectedHash !==
     rec.hash
   ) {
+
     console.log(
       '❌ HMAC CHECK FAILED'
     );
 
-    store.delete(phone);
+    store.delete(
+      key
+    );
 
     return {
       ok: false,
@@ -363,9 +436,10 @@ function verifyOtp(
     };
   }
 
-  /*
-    SUCCESS
-  */
+  /* ==========================================
+     SUCCESS
+  ========================================== */
+
   console.log(
     '✅ OTP MATCHED'
   );
@@ -374,10 +448,12 @@ function verifyOtp(
     '✅ OTP VERIFIED'
   );
 
-  store.delete(phone);
+  store.delete(
+    key
+  );
 
   console.log(
-    'OTP RECORD DELETED'
+    '🗑️ OTP RECORD DELETED'
   );
 
   console.log(
@@ -394,7 +470,10 @@ function verifyOtp(
 ===================================================== */
 
 module.exports = {
+
   issueOtp,
+
   canResend,
+
   verifyOtp,
 };
