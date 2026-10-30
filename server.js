@@ -1,866 +1,1377 @@
-require("dotenv").config();
 
-const express = require("express");
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const dns = require("dns");
+require('dotenv').config();
 
-const otpService = require("./otpService");
+const express = require('express');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const dns = require('dns');
+const otpService = require('./otpService');
 
 const app = express();
-
-/* =====================================================
-   CONFIG
-===================================================== */
-
-const PORT = process.env.PORT || 4000;
-
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  "dev-jwt-secret-change-me";
 
 /* =====================================================
    DNS
 ===================================================== */
 
 dns.setServers([
-  "1.1.1.1",
-  "8.8.8.8",
+  '1.1.1.1',
+  '8.8.8.8',
 ]);
 
 /* =====================================================
-   MIDDLEWARE
+   EXPRESS
 ===================================================== */
 
 app.use(
   express.json({
-    limit: "10mb",
+    limit: '10mb',
   })
 );
 
 app.use(
   express.urlencoded({
     extended: true,
-    limit: "10mb",
+    limit: '10mb',
   })
 );
 
 /* =====================================================
-   CORS
+   CONFIG
 ===================================================== */
 
-app.use((req, res, next) => {
-  res.header(
-    "Access-Control-Allow-Origin",
-    "*"
+const PORT =
+  process.env.PORT || 5000;
+
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  'change_this_to_a_real_secret';
+
+const OTP_TTL =
+  parseInt(
+    process.env.OTP_TTL_SECONDS || '300',
+    10
   );
 
-  res.header(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,DELETE,OPTIONS"
+const MAX_ATTEMPTS =
+  parseInt(
+    process.env.OTP_ATTEMPTS_MAX || '3',
+    10
   );
 
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
+const COOLDOWN_MS =
+  parseInt(
+    process.env.OTP_RESEND_COOLDOWN_MS || '60000',
+    10
   );
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
 
 /* =====================================================
-   MONGODB
+   MONGODB CONNECTION CACHE
+   Vercel / Serverless safe
 ===================================================== */
 
-const MONGODB_URI =
-  process.env.MONGODB_URI;
+let cached =
+  global.__MONGO_CACHE__;
 
-if (!MONGODB_URI) {
-  console.error(
-    "MONGODB_URI is missing from environment variables."
+if (!cached) {
+  cached =
+    global.__MONGO_CACHE__ = {
+      conn: null,
+      promise: null,
+    };
+}
+
+/* =====================================================
+   CONNECT DATABASE
+===================================================== */
+
+async function connectDB() {
+
+  /* Already connected */
+
+  if (
+    cached.conn &&
+    mongoose.connection.readyState === 1
+  ) {
+    return cached.conn;
+  }
+
+  /* Connection currently in progress */
+
+  if (cached.promise) {
+    return cached.promise;
+  }
+
+  /* MONGO_URI check */
+
+  if (!process.env.MONGO_URI) {
+    throw new Error(
+      'MONGO_URI environment variable is missing'
+    );
+  }
+
+  console.log(
+    '[DB] Connecting to MongoDB...'
+  );
+
+  cached.promise =
+    mongoose
+      .connect(
+        process.env.MONGO_URI,
+        {
+          serverSelectionTimeoutMS: 10000,
+          connectTimeoutMS: 10000,
+          socketTimeoutMS: 45000,
+        }
+      )
+      .then(
+        (mongooseInstance) => {
+
+          cached.conn =
+            mongooseInstance.connection;
+
+          console.log(
+            '[OK] MongoDB connected'
+          );
+
+          console.log(
+            '[DB]',
+            cached.conn.name
+          );
+
+          return cached.conn;
+        }
+      )
+      .catch(
+        (error) => {
+
+          console.error(
+            '[DB ERROR]',
+            error.message
+          );
+
+          cached.promise = null;
+          cached.conn = null;
+
+          throw error;
+        }
+      );
+
+  return cached.promise;
+}
+
+/* =====================================================
+   DATABASE MIDDLEWARE
+===================================================== */
+
+app.use(
+  async (req, res, next) => {
+
+    try {
+
+      await connectDB();
+
+      next();
+
+    } catch (err) {
+
+      console.error(
+        '[DB ERROR] Connection failed:',
+        err.message
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          'Database connection failed',
+        error:
+          process.env.NODE_ENV ===
+          'production'
+            ? undefined
+            : err.message,
+      });
+    }
+  }
+);
+
+/* =====================================================
+   PHONE NORMALIZE
+===================================================== */
+
+function normalizePhone(p) {
+
+  let s =
+    String(p || '')
+      .trim()
+      .replace(
+        /[\s-]/g,
+        ''
+      );
+
+  if (!s) {
+    return s;
+  }
+
+  /* Already international */
+
+  if (
+    s.startsWith('+')
+  ) {
+    return s;
+  }
+
+  /* Pakistan local number */
+
+  if (
+    /^0\d{9,10}$/.test(s)
+  ) {
+    return (
+      '+92' +
+      s.slice(1)
+    );
+  }
+
+  /* Pakistan without + */
+
+  if (
+    /^92\d{9,10}$/.test(s)
+  ) {
+    return '+' + s;
+  }
+
+  /* Other countries */
+
+  return s;
+}
+
+/* =====================================================
+   GET ALL PHONE FORMATS
+===================================================== */
+
+function getPhoneFormats(phone) {
+
+  const raw =
+    String(phone || '')
+      .trim()
+      .replace(
+        /[\s-]/g,
+        ''
+      );
+
+  const normalized =
+    normalizePhone(raw);
+
+  const formats =
+    new Set();
+
+  if (raw) {
+    formats.add(raw);
+  }
+
+  if (normalized) {
+    formats.add(normalized);
+  }
+
+  /* Pakistan +92 to local 03xx */
+
+  if (
+    normalized.startsWith('+92')
+  ) {
+
+    formats.add(
+      '0' +
+      normalized.slice(3)
+    );
+  }
+
+  /* International without + */
+
+  if (
+    normalized.startsWith('+')
+  ) {
+
+    formats.add(
+      normalized.slice(1)
+    );
+  }
+
+  return [
+    ...formats,
+  ];
+}
+
+/* =====================================================
+   PHONE VALIDATION
+   Any country allowed.
+   Minimum 6 digits.
+===================================================== */
+
+function isValidMobileNumber(phone) {
+
+  const digits =
+    String(phone || '')
+      .replace(
+        /\D/g,
+        ''
+      );
+
+  return (
+    digits.length >= 6
   );
 }
 
-mongoose
-  .connect(MONGODB_URI)
-  .then(() => {
-    console.log("MongoDB connected");
-  })
-  .catch((error) => {
-    console.error(
-      "MongoDB connection error:",
-      error
-    );
-  });
-
 /* =====================================================
-   ITEM MODEL
+   ERROR HELPER
 ===================================================== */
 
-const itemSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+function fail(
+  res,
+  code,
+  message
+) {
 
-    idNo: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
+  return res
+    .status(code)
+    .json({
+      success: false,
+      message,
+    });
+}
 
-    phone: {
-      type: String,
-      trim: true,
-      default: "",
-    },
+/* =====================================================
+   HOME
+===================================================== */
 
-    password: {
-      type: String,
-      default: "",
-    },
+app.get(
+  '/',
+  (req, res) => {
 
-    /* =================================================
-       PASSPORT
-    ================================================= */
-
-    passportNo: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-
-    passportType: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-
-    passportIssueDate: {
-      type: String,
-      default: "",
-    },
-
-    passportExpiryDate: {
-      type: String,
-      default: "",
-    },
-
-    passportPlaceOfIssue: {
-      type: String,
-      default: "",
-    },
-
-    passportStatus: {
-      type: String,
-      default: "",
-    },
-
-    /* =================================================
-       IQAMA
-    ================================================= */
-
-    idVersion: {
-      type: String,
-      default: "",
-    },
-
-    iqamaIssueDate: {
-      type: String,
-      default: "",
-    },
-
-    iqamaExpiryDate: {
-      type: String,
-      default: "",
-    },
-
-    /* =================================================
-       TRAVEL
-    ================================================= */
-
-    travelStatus: {
-      type: String,
-      default: "",
-    },
-
-    lastTravelDestination: {
-      type: String,
-      default: "",
-    },
-
-    lastTravelDate: {
-      type: String,
-      default: "",
-    },
-
-    balance: {
-      type: String,
-      default: "",
-    },
-
-    /* =================================================
-       IMAGES
-    ================================================= */
-
-    userImageUrl: {
-      type: String,
-      default: "",
-    },
-
-    cardImageUrl: {
-      type: String,
-      default: "",
-    },
-
-    iqamaImageUrl: {
-      type: String,
-      default: "",
-    },
-
-    qrCode1Url: {
-      type: String,
-      default: "",
-    },
-
-    drivingLicenseImageUrl: {
-      type: String,
-      default: "",
-    },
-
-    qrCode2Url: {
-      type: String,
-      default: "",
-    },
-  },
-  {
-    timestamps: true,
+    res.json({
+      success: true,
+      message:
+        'Abshar API is running',
+    });
   }
 );
-
-const Item =
-  mongoose.models.Item ||
-  mongoose.model("Item", itemSchema);
 
 /* =====================================================
    HEALTH
 ===================================================== */
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Absher backend is running",
-    database:
-      mongoose.connection.readyState === 1
-        ? "connected"
-        : "disconnected",
-    time: new Date().toISOString(),
-  });
-});
-
-/* =====================================================
-   HELPER
-   SAFE USER RESPONSE
-===================================================== */
-
-function safeItem(item) {
-  if (!item) return null;
-
-  const object =
-    typeof item.toObject === "function"
-      ? item.toObject()
-      : item;
-
-  return {
-    id: String(
-      object._id ||
-      object.id ||
-      ""
-    ),
-
-    name: object.name || "",
-
-    idNo: object.idNo || "",
-
-    phone: object.phone || "",
-
-    /* ===============================================
-       PASSWORD NEVER RETURNED
-    =============================================== */
-
-    passportNo:
-      object.passportNo || "",
-
-    passportType:
-      object.passportType || "",
-
-    passportIssueDate:
-      object.passportIssueDate || "",
-
-    passportExpiryDate:
-      object.passportExpiryDate || "",
-
-    passportPlaceOfIssue:
-      object.passportPlaceOfIssue || "",
-
-    passportStatus:
-      object.passportStatus || "",
-
-    idVersion:
-      object.idVersion || "",
-
-    iqamaIssueDate:
-      object.iqamaIssueDate || "",
-
-    iqamaExpiryDate:
-      object.iqamaExpiryDate || "",
-
-    travelStatus:
-      object.travelStatus || "",
-
-    lastTravelDestination:
-      object.lastTravelDestination || "",
-
-    lastTravelDate:
-      object.lastTravelDate || "",
-
-    balance:
-      object.balance || "",
-
-    userImageUrl:
-      object.userImageUrl ||
-      object.images?.userImage ||
-      "",
-
-    cardImageUrl:
-      object.cardImageUrl ||
-      object.images?.cardImage ||
-      "",
-
-    iqamaImageUrl:
-      object.iqamaImageUrl ||
-      object.images?.iqamaImage ||
-      "",
-
-    qrCode1Url:
-      object.qrCode1Url ||
-      object.images?.qrCode1 ||
-      "",
-
-    drivingLicenseImageUrl:
-      object.drivingLicenseImageUrl ||
-      object.images?.drivingLicenseImage ||
-      "",
-
-    qrCode2Url:
-      object.qrCode2Url ||
-      object.images?.qrCode2 ||
-      "",
-
-    images: {
-      userImage:
-        object.userImageUrl ||
-        object.images?.userImage ||
-        "",
-
-      cardImage:
-        object.cardImageUrl ||
-        object.images?.cardImage ||
-        "",
-
-      iqamaImage:
-        object.iqamaImageUrl ||
-        object.images?.iqamaImage ||
-        "",
-
-      qrCode1:
-        object.qrCode1Url ||
-        object.images?.qrCode1 ||
-        "",
-
-      drivingLicenseImage:
-        object.drivingLicenseImageUrl ||
-        object.images?.drivingLicenseImage ||
-        "",
-
-      qrCode2:
-        object.qrCode2Url ||
-        object.images?.qrCode2 ||
-        "",
-    },
-  };
-}
-
-/* =====================================================
-   GET ALL ITEMS
-   DASHBOARD
-===================================================== */
-
-app.get("/api/items", async (req, res) => {
-  try {
-    const items = await Item.find({})
-      .sort({
-        createdAt: -1,
-      })
-      .lean();
+app.get(
+  '/api/health',
+  (req, res) => {
 
     res.json({
       success: true,
-      items: items.map(safeItem),
+      message:
+        'Server is running',
+
+      mongodb:
+        mongoose.connection
+          .readyState === 1,
+
+      database:
+        mongoose.connection.name ||
+        null,
     });
-  } catch (error) {
-    console.error(
-      "GET ITEMS ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Could not load records",
-    });
-  }
-});
-
-/* =====================================================
-   GET SINGLE ITEM
-===================================================== */
-
-app.get(
-  "/api/items/:id",
-  async (req, res) => {
-    try {
-      const item =
-        await Item.findById(
-          req.params.id
-        );
-
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message: "Record not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        item: safeItem(item),
-      });
-    } catch (error) {
-      console.error(
-        "GET SINGLE ITEM ERROR:",
-        error
-      );
-
-      res.status(500).json({
-        success: false,
-        message: "Could not load record",
-      });
-    }
   }
 );
 
 /* =====================================================
-   FIND BY IQAMA
-===================================================== */
-
-app.get(
-  "/api/items/by-idno/:idNo",
-  async (req, res) => {
-    try {
-      const idNo = String(
-        req.params.idNo || ""
-      ).trim();
-
-      if (!idNo) {
-        return res.status(400).json({
-          success: false,
-          message: "Iqama number is required",
-        });
-      }
-
-      const item =
-        await Item.findOne({
-          idNo,
-        });
-
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "No record found for this Iqama number",
-        });
-      }
-
-      res.json({
-        success: true,
-        item: safeItem(item),
-      });
-    } catch (error) {
-      console.error(
-        "FIND BY IDNO ERROR:",
-        error
-      );
-
-      res.status(500).json({
-        success: false,
-        message: "Server error",
-      });
-    }
-  }
-);
-
-/* =====================================================
-   REQUEST OTP USING IQAMA
+   REGISTER
+   COLLECTION: items
 ===================================================== */
 
 app.post(
-  "/api/login-id",
+  '/api/register',
   async (req, res) => {
+
     try {
-      const idNo = String(
-        req.body?.idNo || ""
-      ).trim();
 
-      if (!idNo) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Iqama number is required",
-        });
-      }
+      const rawPhone =
+        String(
+          req.body.phone || ''
+        ).trim();
 
-      /* =============================================
-         FIND PERSON BY IQAMA
-      ============================================= */
-
-      const item =
-        await Item.findOne({
-          idNo,
-        });
-
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Iqama number not found",
-        });
-      }
-
-      /* =============================================
-         PHONE REQUIRED
-      ============================================= */
-
-      if (!item.phone) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "No phone number is registered for this Iqama",
-        });
-      }
-
-      /* =============================================
-         RESEND COOLDOWN
-      ============================================= */
-
-      const resend =
-        otpService.canResend(
-          item.phone,
-          60000
+      const password =
+        String(
+          req.body.password || ''
         );
 
-      if (!resend.ok) {
-        return res.status(429).json({
-          success: false,
-          message:
-            `Please wait ${Math.ceil(
-              resend.waitMs / 1000
-            )} seconds before requesting another OTP.`,
-          waitMs:
-            resend.waitMs,
-        });
+      console.log('\n');
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '         📝 REGISTER REQUEST'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '📱 Phone:',
+        rawPhone
+      );
+
+      console.log(
+        '👤 Name:',
+        req.body.name
+      );
+
+      console.log(
+        '🪪 ID NO:',
+        req.body.idNo ||
+        req.body.cnic
+      );
+
+      console.log(
+        '🖼️ User Image:',
+        req.body.userImageUrl ||
+        req.body.imageUrl
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      /* Mobile validation */
+
+      if (
+        !isValidMobileNumber(
+          rawPhone
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
       }
 
-      /* =============================================
-         ISSUE OTP
-      ============================================= */
+      /* Password validation */
 
-      const otp =
-        otpService.issueOtp(
-          item.phone,
-          300,
-          3
+      if (
+        password.length < 6
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Password kam se kam 6 characters ka rakho'
+        );
+      }
+
+      const phoneFormats =
+        getPhoneFormats(
+          rawPhone
         );
 
-      console.log("");
       console.log(
-        "LOGIN OTP REQUEST"
+        '📱 Phone Formats:',
+        phoneFormats
       );
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      const existing =
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
+
+      if (existing) {
+
+        console.log(
+          '❌ REGISTER FAILED: Number already exists'
+        );
+
+        return fail(
+          res,
+          409,
+          'Ye number already registered hai'
+        );
+      }
+
+      /* ==========================================
+         PASSWORD HASH
+      ========================================== */
+
+      const hashedPassword =
+        await bcrypt.hash(
+          password,
+          10
+        );
+
+      /* ==========================================
+         NEW USER
+      ========================================== */
+
+      const newUser = {
+
+        name:
+          String(
+            req.body.name ||
+            'User'
+          ),
+
+        idNo:
+          String(
+            req.body.idNo ||
+            req.body.cnic ||
+            ''
+          ),
+
+        phone:
+          normalizePhone(
+            rawPhone
+          ),
+
+        password:
+          hashedPassword,
+
+        /* User profile image */
+
+        userImageUrl:
+          String(
+            req.body.userImageUrl ||
+            req.body.imageUrl ||
+            ''
+          ),
+
+        /* Iqama image */
+
+        iqamaImageUrl:
+          String(
+            req.body.iqamaImageUrl ||
+            ''
+          ),
+
+        /* QR Code 1 */
+
+        qrCode1Url:
+          String(
+            req.body.qrCode1Url ||
+            ''
+          ),
+
+        /* Driving License */
+
+        drivingLicenseImageUrl:
+          String(
+            req.body.drivingLicenseImageUrl ||
+            ''
+          ),
+
+        /* QR Code 2 */
+
+        qrCode2Url:
+          String(
+            req.body.qrCode2Url ||
+            ''
+          ),
+
+        /* Card image */
+
+        cardImageUrl:
+          String(
+            req.body.cardImageUrl ||
+            ''
+          ),
+
+        userImagePublicId:
+          String(
+            req.body.userImagePublicId ||
+            ''
+          ),
+
+        cardImagePublicId:
+          String(
+            req.body.cardImagePublicId ||
+            ''
+          ),
+
+        createdAt:
+          new Date(),
+
+        updatedAt:
+          new Date(),
+      };
+
+      console.log('\n');
+
       console.log(
-        "IQAMA:",
-        idNo
+        '========== DATA SAVING TO MONGODB =========='
       );
+
       console.log(
-        "PHONE:",
-        item.phone
+        JSON.stringify(
+          {
+            ...newUser,
+            password:
+              '********',
+          },
+          null,
+          2
+        )
       );
+
       console.log(
-        "OTP:",
-        otp
+        '============================================='
+      );
+
+      const result =
+        await itemsCollection.insertOne(
+          newUser
+        );
+
+      console.log(
+        '✅ USER INSERTED'
+      );
+
+      console.log(
+        '🆔 MongoDB ID:',
+        result.insertedId.toString()
       );
 
       return res.json({
-        success: true,
+
+        success:
+          true,
 
         message:
-          "OTP sent successfully",
+          'Successfully registered! Ab login karo.',
 
-        idNo,
-
-        /* =========================================
-           DEVELOPMENT ONLY
-        ========================================= */
-
-        ...(process.env.NODE_ENV !==
-          "production" && {
-          otp,
-        }),
-
-        /* Do not expose full phone */
-        phone:
-          maskPhone(item.phone),
+        userId:
+          String(
+            result.insertedId
+          ),
       });
-    } catch (error) {
+
+    } catch (e) {
+
       console.error(
-        "LOGIN ID ERROR:",
-        error
+        '❌ REGISTER ERROR:',
+        e
       );
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Could not send OTP",
-      });
+      return fail(
+        res,
+        500,
+        'Registration failed'
+      );
     }
   }
 );
 
 /* =====================================================
-   VERIFY IQAMA OTP
+   LOGIN
 ===================================================== */
 
 app.post(
-  "/api/verify-id-otp",
+  '/api/login',
   async (req, res) => {
+
     try {
-      const idNo = String(
-        req.body?.idNo || ""
-      ).trim();
 
-      const otp = String(
-        req.body?.otp || ""
-      )
-        .trim()
-        .replace(/[^0-9]/g, "");
+      const rawPhone =
+        String(
+          req.body.phone || ''
+        ).trim();
 
-      if (!idNo) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Iqama number is required",
-        });
+      const password =
+        String(
+          req.body.password || ''
+        );
+
+      console.log('\n');
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '             🔐 LOGIN REQUEST'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '📱 Requested Phone:',
+        rawPhone
+      );
+
+      console.log(
+        '🔑 Password Received:',
+        password
+          ? 'YES'
+          : 'NO'
+      );
+
+      /* Mobile validation */
+
+      if (
+        !isValidMobileNumber(
+          rawPhone
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
       }
 
-      if (!otp) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "OTP is required",
-        });
+      /* Password validation */
+
+      if (!password) {
+
+        return fail(
+          res,
+          400,
+          'Password required'
+        );
       }
 
-      /* =============================================
-         FIND PERSON
-      ============================================= */
+      const normalizedPhone =
+        normalizePhone(
+          rawPhone
+        );
+
+      const phoneFormats =
+        getPhoneFormats(
+          rawPhone
+        );
+
+      console.log(
+        '📱 Normalized Phone:',
+        normalizedPhone
+      );
+
+      console.log(
+        '📱 Phone Formats:',
+        phoneFormats
+      );
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      /* ==========================================
+         FIND USER BY PHONE
+      ========================================== */
 
       const item =
-        await Item.findOne({
-          idNo,
-        });
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
+
+      /* ==========================================
+         SHOW MONGODB LOGIN DATA
+      ========================================== */
+
+      console.log('\n');
+
+      console.log(
+        '========== MONGODB LOGIN RESULT =========='
+      );
+
+      if (item) {
+
+        console.log(
+          '✅ USER FOUND IN MONGODB'
+        );
+
+        console.log(
+          JSON.stringify(
+            {
+              _id:
+                item._id,
+
+              name:
+                item.name,
+
+              idNo:
+                item.idNo,
+
+              phone:
+                item.phone,
+
+              userImageUrl:
+                item.userImageUrl,
+
+              iqamaImageUrl:
+                item.iqamaImageUrl,
+
+              qrCode1Url:
+                item.qrCode1Url,
+
+              drivingLicenseImageUrl:
+                item.drivingLicenseImageUrl,
+
+              qrCode2Url:
+                item.qrCode2Url,
+
+              cardImageUrl:
+                item.cardImageUrl,
+
+              userImagePublicId:
+                item.userImagePublicId,
+
+              cardImagePublicId:
+                item.cardImagePublicId,
+
+              createdAt:
+                item.createdAt,
+
+              updatedAt:
+                item.updatedAt,
+            },
+            null,
+            2
+          )
+        );
+
+      } else {
+
+        console.log(
+          '❌ USER NOT FOUND IN MONGODB'
+        );
+
+        console.log(
+          'Searched Phone Formats:',
+          phoneFormats
+        );
+      }
+
+      console.log(
+        '=========================================='
+      );
 
       if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Iqama number not found",
-        });
+
+        return fail(
+          res,
+          401,
+          'Invalid mobile number or password'
+        );
       }
 
-      /* =============================================
-         PHONE
-      ============================================= */
+      /* ==========================================
+         PASSWORD CHECK
+      ========================================== */
 
-      if (!item.phone) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Phone number not found",
-        });
+      let passwordCorrect =
+        false;
+
+      /* New bcrypt password */
+
+      if (
+        item.password &&
+        String(
+          item.password
+        ).startsWith('$2')
+      ) {
+
+        passwordCorrect =
+          await bcrypt.compare(
+            password,
+            item.password
+          );
+
+      } else {
+
+        /*
+          Temporary support for old
+          plaintext passwords.
+        */
+
+        passwordCorrect =
+          password ===
+          String(
+            item.password || ''
+          );
       }
 
-      /* =============================================
+      if (!passwordCorrect) {
+
+        console.log(
+          '❌ PASSWORD INCORRECT'
+        );
+
+        return fail(
+          res,
+          401,
+          'Invalid mobile number or password'
+        );
+      }
+
+      console.log(
+        '✅ PASSWORD CORRECT'
+      );
+
+      /* ==========================================
+         OTP COOLDOWN
+      ========================================== */
+
+      const resend =
+        otpService.canResend(
+          normalizedPhone,
+          COOLDOWN_MS
+        );
+
+      if (!resend.ok) {
+
+        console.log(
+          '⏳ OTP COOLDOWN:',
+          Math.ceil(
+            resend.waitMs /
+            1000
+          ),
+          'seconds'
+        );
+
+        return fail(
+          res,
+          429,
+          `Naya OTP lane se pehle ${Math.ceil(
+            resend.waitMs / 1000
+          )}s ruko`
+        );
+      }
+
+      /* ==========================================
+         ISSUE OTP
+      ========================================== */
+
+      const otp =
+        otpService.issueOtp(
+          normalizedPhone,
+          OTP_TTL,
+          MAX_ATTEMPTS
+        );
+
+      console.log(
+        `[OTP] ${normalizedPhone}: ${otp}`
+      );
+
+      console.log(
+        '========================================\n'
+      );
+
+      return res.json({
+
+        success:
+          true,
+
+        message:
+          'Login successful',
+
+        otp,
+
+        expiresIn:
+          OTP_TTL,
+      });
+
+    } catch (e) {
+
+      console.error(
+        '❌ LOGIN ERROR:',
+        e
+      );
+
+      return fail(
+        res,
+        500,
+        'Server/MongoDB error'
+      );
+    }
+  }
+);
+
+/* =====================================================
+   VERIFY OTP
+===================================================== */
+
+app.post(
+  '/api/verify-otp',
+  async (req, res) => {
+
+    try {
+
+      const phone =
+        normalizePhone(
+          req.body.phone
+        );
+
+      const otp =
+        String(
+          req.body.otp || ''
+        ).trim();
+
+      console.log('\n');
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '          🔢 VERIFY OTP REQUEST'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '📱 Phone:',
+        phone
+      );
+
+      console.log(
+        '🔢 OTP:',
+        otp
+      );
+
+      /* ==========================================
+         MOBILE VALIDATION
+         Any country
+         Minimum 6 digits
+      ========================================== */
+
+      if (
+        !isValidMobileNumber(
+          phone
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'Invalid mobile number'
+        );
+      }
+
+      /* ==========================================
+         OTP VALIDATION
+      ========================================== */
+
+      if (
+        !/^\d{4}$/.test(
+          otp
+        )
+      ) {
+
+        return fail(
+          res,
+          400,
+          'OTP 4 digits ka hona chahiye'
+        );
+      }
+
+      /* ==========================================
          VERIFY OTP
-      ============================================= */
+      ========================================== */
 
       const result =
         otpService.verifyOtp(
-          item.phone,
+          phone,
           otp
         );
 
+      console.log(
+        '🔐 OTP Result:',
+        result
+      );
+
       if (!result.ok) {
-        let message =
-          "Invalid OTP";
 
-        if (
-          result.reason ===
-          "expired"
-        ) {
-          message =
-            "OTP has expired";
-        }
+        const reasons = {
 
-        if (
-          result.reason ===
-          "locked"
-        ) {
-          message =
-            "Too many OTP attempts";
-        }
+          no_otp:
+            'Is number ke liye koi OTP issue nahi hua',
 
-        if (
-          result.reason ===
-          "no_otp"
-        ) {
-          message =
-            "No OTP found. Please request a new OTP";
-        }
+          no_orphan:
+            'Is number ke liye koi OTP issue nahi hua',
 
-        return res.status(401).json({
-          success: false,
-          message,
+          expired:
+            'OTP expire ho gaya. Dobara login karo.',
 
-          reason:
-            result.reason,
+          locked:
+            'Bahut zyada galat attempts. Dobara login karke naya OTP lo.',
 
-          attemptsLeft:
-            result.attemptsLeft,
-        });
+          wrong:
+            `OTP galat hai. ${
+              result.attemptsLeft ?? 0
+            } attempts baqi hain.`,
+        };
+
+        return fail(
+          res,
+          401,
+          reasons[
+            result.reason
+          ] ||
+            'OTP verification failed'
+        );
       }
 
-      /* =============================================
-         CREATE LOGIN TOKEN
-      ============================================= */
+      /* ==========================================
+         PHONE FORMATS
+      ========================================== */
+
+      const phoneFormats =
+        getPhoneFormats(
+          phone
+        );
+
+      console.log(
+        '📱 Phone Formats:',
+        phoneFormats
+      );
+
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
+
+      /* ==========================================
+         FIND USER
+      ========================================== */
+
+      const user =
+        await itemsCollection.findOne(
+          {
+            phone: {
+              $in:
+                phoneFormats,
+            },
+          }
+        );
+
+      /* ==========================================
+         MONGODB USER AFTER OTP
+      ========================================== */
+
+      console.log('\n');
+
+      console.log(
+        '====== MONGODB USER AFTER OTP ======'
+      );
+
+      if (user) {
+
+        console.log(
+          '✅ USER FOUND AFTER OTP'
+        );
+
+        console.log(
+          JSON.stringify(
+            {
+              _id:
+                user._id,
+
+              name:
+                user.name,
+
+              idNo:
+                user.idNo,
+
+              phone:
+                user.phone,
+
+              userImageUrl:
+                user.userImageUrl,
+
+              iqamaImageUrl:
+                user.iqamaImageUrl,
+
+              qrCode1Url:
+                user.qrCode1Url,
+
+              drivingLicenseImageUrl:
+                user.drivingLicenseImageUrl,
+
+              qrCode2Url:
+                user.qrCode2Url,
+
+              cardImageUrl:
+                user.cardImageUrl,
+
+              userImagePublicId:
+                user.userImagePublicId,
+
+              cardImagePublicId:
+                user.cardImagePublicId,
+
+              createdAt:
+                user.createdAt,
+
+              updatedAt:
+                user.updatedAt,
+            },
+            null,
+            2
+          )
+        );
+
+      } else {
+
+        console.log(
+          '❌ USER NOT FOUND AFTER OTP'
+        );
+      }
+
+      console.log(
+        '===================================='
+      );
+
+      if (!user) {
+
+        return fail(
+          res,
+          404,
+          'User MongoDB me nahi mila'
+        );
+      }
+
+      /* ==========================================
+         JWT
+      ========================================== */
 
       const token =
         jwt.sign(
           {
-            userId: String(
-              item._id
-            ),
+            userId:
+              String(
+                user._id
+              ),
 
-            idNo:
-              item.idNo,
+            phone:
+              user.phone,
           },
+
           JWT_SECRET,
+
           {
             expiresIn:
-              "7d",
+              '7d',
           }
         );
 
-      /* =============================================
-         SUCCESS
-      ============================================= */
-
-      console.log("");
       console.log(
-        "========================================"
-      );
-      console.log(
-        "IQAMA LOGIN SUCCESS"
-      );
-      console.log(
-        "NAME:",
-        item.name
-      );
-      console.log(
-        "IQAMA:",
-        item.idNo
-      );
-      console.log(
-        "PHONE:",
-        item.phone
-      );
-      console.log(
-        "========================================"
+        '✅ JWT TOKEN CREATED'
       );
 
       return res.json({
-        success: true,
+
+        success:
+          true,
 
         message:
-          "Login successful",
+          'OTP verified successfully',
 
         token,
-
-        user: safeItem(item),
       });
-    } catch (error) {
+
+    } catch (e) {
+
       console.error(
-        "VERIFY ID OTP ERROR:",
-        error
+        '❌ VERIFY OTP ERROR:',
+        e
       );
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Could not verify OTP",
-      });
+      return fail(
+        res,
+        500,
+        'OTP verification failed'
+      );
     }
   }
 );
 
 /* =====================================================
-   CURRENT USER
-   GET /api/me
+   GET CURRENT USER
+   /api/me
 ===================================================== */
 
 app.get(
-  "/api/me",
+  '/api/me',
   async (req, res) => {
-    try {
-      const header =
-        req.headers.authorization ||
-        "";
 
-      if (!header.startsWith("Bearer ")) {
-        return res.status(401).json({
-          success: false,
-          message:
-            "Authentication token required",
-        });
+    try {
+
+      console.log('\n');
+
+      console.log(
+        '========================================'
+      );
+
+      console.log(
+        '              👤 /api/me'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+      const authHeader =
+        req.headers.authorization ||
+        '';
+
+      if (
+        !authHeader.startsWith(
+          'Bearer '
+        )
+      ) {
+
+        console.log(
+          '❌ Authorization token missing'
+        );
+
+        return fail(
+          res,
+          401,
+          'Authorization token required'
+        );
       }
 
       const token =
-        header.substring(7);
+        authHeader
+          .replace(
+            'Bearer ',
+            ''
+          )
+          .trim();
+
+      console.log(
+        '🔑 Authorization token received'
+      );
+
+      /* ==========================================
+         VERIFY JWT
+      ========================================== */
 
       const decoded =
         jwt.verify(
@@ -868,447 +1379,387 @@ app.get(
           JWT_SECRET
         );
 
-      const item =
-        await Item.findById(
-          decoded.userId
-        );
-
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "User record not found",
-        });
-      }
-
-      return res.json({
-        success: true,
-        user: safeItem(item),
-      });
-    } catch (error) {
-      console.error(
-        "ME ERROR:",
-        error
+      console.log(
+        '✅ JWT DECODED:'
       );
 
-      return res.status(401).json({
-        success: false,
-        message:
-          "Invalid or expired token",
-      });
-    }
-  }
-);
+      console.log(
+        JSON.stringify(
+          decoded,
+          null,
+          2
+        )
+      );
 
-/* =====================================================
-   CREATE ITEM
-===================================================== */
+      const itemsCollection =
+        mongoose.connection.collection(
+          'items'
+        );
 
-app.post(
-  "/api/items",
-  async (req, res) => {
-    try {
-      const body = req.body || {};
+      let user =
+        null;
 
-      if (
-        !body.name ||
-        !String(body.name).trim()
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Name is required",
-        });
-      }
+      /* ==========================================
+         FIND BY MONGODB ID
+      ========================================== */
 
       if (
-        !body.idNo ||
-        !String(body.idNo).trim()
+        decoded.userId
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Iqama number is required",
-        });
-      }
 
-      /* =============================================
-         CHECK DUPLICATE IQAMA
-      ============================================= */
+        try {
 
-      const existing =
-        await Item.findOne({
-          idNo: String(
-            body.idNo
-          ).trim(),
-        });
+          user =
+            await itemsCollection.findOne(
+              {
+                _id:
+                  new mongoose.Types.ObjectId(
+                    decoded.userId
+                  ),
+              }
+            );
 
-      if (existing) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "This Iqama number already exists",
-        });
-      }
-
-      /* =============================================
-         PASSWORD
-      ============================================= */
-
-      let password = "";
-
-      if (
-        body.password &&
-        String(
-          body.password
-        ).trim()
-      ) {
-        password =
-          await bcrypt.hash(
-            String(body.password),
-            10
+          console.log(
+            '🔎 MongoDB ID Search:',
+            decoded.userId
           );
-      }
 
-      const item =
-        new Item({
-          name:
-            String(body.name).trim(),
-
-          idNo:
-            String(body.idNo).trim(),
-
-          phone:
-            String(body.phone || "").trim(),
-
-          password,
-
-          passportNo:
-            body.passportNo || "",
-
-          passportType:
-            body.passportType || "",
-
-          passportIssueDate:
-            body.passportIssueDate || "",
-
-          passportExpiryDate:
-            body.passportExpiryDate || "",
-
-          passportPlaceOfIssue:
-            body.passportPlaceOfIssue || "",
-
-          passportStatus:
-            body.passportStatus || "",
-
-          idVersion:
-            body.idVersion || "",
-
-          iqamaIssueDate:
-            body.iqamaIssueDate || "",
-
-          iqamaExpiryDate:
-            body.iqamaExpiryDate || "",
-
-          travelStatus:
-            body.travelStatus || "",
-
-          lastTravelDestination:
-            body.lastTravelDestination || "",
-
-          lastTravelDate:
-            body.lastTravelDate || "",
-
-          balance:
-            body.balance || "",
-
-          userImageUrl:
-            body.userImageUrl || "",
-
-          cardImageUrl:
-            body.cardImageUrl || "",
-
-          iqamaImageUrl:
-            body.iqamaImageUrl || "",
-
-          qrCode1Url:
-            body.qrCode1Url || "",
-
-          drivingLicenseImageUrl:
-            body.drivingLicenseImageUrl || "",
-
-          qrCode2Url:
-            body.qrCode2Url || "",
-        });
-
-      await item.save();
-
-      return res.status(201).json({
-        success: true,
-        message:
-          "Record created successfully",
-        item: safeItem(item),
-      });
-    } catch (error) {
-      console.error(
-        "CREATE ITEM ERROR:",
-        error
-      );
-
-      res.status(500).json({
-        success: false,
-        message:
-          "Could not create record",
-        error:
-          process.env.NODE_ENV !==
-          "production"
-            ? error.message
-            : undefined,
-      });
-    }
-  }
-);
-
-/* =====================================================
-   UPDATE ITEM
-===================================================== */
-
-app.put(
-  "/api/items/:id",
-  async (req, res) => {
-    try {
-      const item =
-        await Item.findById(
-          req.params.id
-        );
-
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Record not found",
-        });
-      }
-
-      const body =
-        req.body || {};
-
-      /* =============================================
-         UPDATE BASIC FIELDS
-      ============================================= */
-
-      const fields = [
-        "name",
-        "idNo",
-        "phone",
-
-        "passportNo",
-        "passportType",
-        "passportIssueDate",
-        "passportExpiryDate",
-        "passportPlaceOfIssue",
-        "passportStatus",
-
-        "idVersion",
-        "iqamaIssueDate",
-        "iqamaExpiryDate",
-
-        "travelStatus",
-        "lastTravelDestination",
-        "lastTravelDate",
-        "balance",
-
-        "userImageUrl",
-        "cardImageUrl",
-        "iqamaImageUrl",
-        "qrCode1Url",
-        "drivingLicenseImageUrl",
-        "qrCode2Url",
-      ];
-
-      for (const field of fields) {
-        if (
-          body[field] !==
-          undefined
+        } catch (
+          idError
         ) {
-          item[field] =
-            body[field];
+
+          console.log(
+            '❌ ID LOOKUP ERROR:',
+            idError.message
+          );
         }
       }
 
-      /* =============================================
-         PASSWORD UPDATE
-      ============================================= */
+      /* ==========================================
+         FALLBACK PHONE SEARCH
+      ========================================== */
 
       if (
-        body.password &&
-        String(
-          body.password
-        ).trim()
+        !user &&
+        decoded.phone
       ) {
-        item.password =
-          await bcrypt.hash(
-            String(
-              body.password
-            ),
-            10
+
+        const phoneFormats =
+          getPhoneFormats(
+            decoded.phone
+          );
+
+        console.log(
+          '🔎 Fallback Phone Search:',
+          phoneFormats
+        );
+
+        user =
+          await itemsCollection.findOne(
+            {
+              phone: {
+                $in:
+                  phoneFormats,
+              },
+            }
           );
       }
 
-      await item.save();
+      /* ==========================================
+         SHOW RAW MONGODB DATA
+      ========================================== */
 
-      return res.json({
-        success: true,
-        message:
-          "Record updated successfully",
-        item: safeItem(item),
-      });
-    } catch (error) {
-      console.error(
-        "UPDATE ITEM ERROR:",
-        error
+      console.log('\n');
+
+      console.log(
+        '========== RAW MONGODB USER =========='
       );
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Could not update record",
-      });
-    }
-  }
-);
+      if (user) {
 
-/* =====================================================
-   DELETE ITEM
-===================================================== */
-
-app.delete(
-  "/api/items/:id",
-  async (req, res) => {
-    try {
-      const item =
-        await Item.findByIdAndDelete(
-          req.params.id
+        console.log(
+          '✅ USER FOUND IN MONGODB'
         );
 
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Record not found",
-        });
+        console.log(
+          JSON.stringify(
+            user,
+            null,
+            2
+          )
+        );
+
+      } else {
+
+        console.log(
+          '❌ USER NOT FOUND IN MONGODB'
+        );
       }
 
-      res.json({
-        success: true,
-        message:
-          "Record deleted successfully",
+      console.log(
+        '======================================='
+      );
+
+      if (!user) {
+
+        return fail(
+          res,
+          404,
+          'User MongoDB me nahi mila'
+        );
+      }
+
+      /* ==========================================
+         SAFE USER DATA
+      ========================================== */
+
+      const safeUser = {
+
+        id:
+          String(
+            user._id
+          ),
+
+        name:
+          user.name || '',
+
+        idNo:
+          user.idNo || '',
+
+        phone:
+          user.phone || '',
+
+        /* Profile */
+
+        userImageUrl:
+          user.userImageUrl || '',
+
+        /* Iqama */
+
+        iqamaImageUrl:
+          user.iqamaImageUrl || '',
+
+        /* QR Code 1 */
+
+        qrCode1Url:
+          user.qrCode1Url || '',
+
+        /* Driving License */
+
+        drivingLicenseImageUrl:
+          user.drivingLicenseImageUrl || '',
+
+        /* QR Code 2 */
+
+        qrCode2Url:
+          user.qrCode2Url || '',
+
+        /* Card */
+
+        cardImageUrl:
+          user.cardImageUrl || '',
+
+        /* Cloudinary IDs */
+
+        userImagePublicId:
+          user.userImagePublicId || '',
+
+        cardImagePublicId:
+          user.cardImagePublicId || '',
+
+        createdAt:
+          user.createdAt ||
+          null,
+
+        updatedAt:
+          user.updatedAt ||
+          null,
+      };
+
+      /* ==========================================
+         DATA SENT TO APP
+      ========================================== */
+
+      console.log('\n');
+
+      console.log(
+        '========== 📦 DATA SENT TO APP =========='
+      );
+
+      console.log(
+        JSON.stringify(
+          safeUser,
+          null,
+          2
+        )
+      );
+
+      console.log(
+        '=========================================='
+      );
+
+      console.log(
+        '🖼️ USER IMAGE URL:',
+        safeUser.userImageUrl
+      );
+
+      console.log(
+        '🪪 IQAMA IMAGE URL:',
+        safeUser.iqamaImageUrl
+      );
+
+      console.log(
+        '🔳 QR CODE 1 URL:',
+        safeUser.qrCode1Url
+      );
+
+      console.log(
+        '🚗 DRIVING LICENSE URL:',
+        safeUser.drivingLicenseImageUrl
+      );
+
+      console.log(
+        '🔳 QR CODE 2 URL:',
+        safeUser.qrCode2Url
+      );
+
+      console.log(
+        '🪪 CARD IMAGE URL:',
+        safeUser.cardImageUrl
+      );
+
+      console.log(
+        '👤 NAME:',
+        safeUser.name
+      );
+
+      console.log(
+        '🆔 ID NO:',
+        safeUser.idNo
+      );
+
+      console.log(
+        '📱 PHONE:',
+        safeUser.phone
+      );
+
+      console.log(
+        '========================================\n'
+      );
+
+      return res.json({
+
+        success:
+          true,
+
+        user:
+          safeUser,
       });
-    } catch (error) {
+
+    } catch (e) {
+
       console.error(
-        "DELETE ITEM ERROR:",
-        error
+        '❌ ME ERROR:',
+        e
       );
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Could not delete record",
-      });
+      return fail(
+        res,
+        401,
+        'Token invalid ya expired hai'
+      );
     }
   }
 );
 
 /* =====================================================
-   MASK PHONE
+   MONGOOSE CONNECTION EVENTS
 ===================================================== */
 
-function maskPhone(phone) {
-  const value = String(
-    phone || ""
-  );
+mongoose.connection.on(
+  'connected',
+  () => {
 
-  if (value.length <= 4) {
-    return value;
-  }
-
-  return (
-    "*".repeat(
-      Math.max(
-        0,
-        value.length - 4
-      )
-    ) +
-    value.slice(-4)
-  );
-}
-
-/* =====================================================
-   ROOT
-===================================================== */
-
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message:
-      "Absher Dashboard Backend API",
-  });
-});
-
-/* =====================================================
-   ERROR HANDLER
-===================================================== */
-
-app.use(
-  (error, req, res, next) => {
-    console.error(
-      "GLOBAL ERROR:",
-      error
+    console.log(
+      '[MONGODB] Connected'
     );
+  }
+);
 
-    if (
-      error.type ===
-      "entity.too.large"
-    ) {
-      return res.status(413).json({
-        success: false,
-        message:
-          "Payload too large",
-      });
-    }
+mongoose.connection.on(
+  'error',
+  (error) => {
 
-    res.status(500).json({
-      success: false,
-      message:
-        "Internal server error",
-    });
+    console.error(
+      '[MONGODB] Error:',
+      error.message
+    );
+  }
+);
+
+mongoose.connection.on(
+  'disconnected',
+  () => {
+
+    console.log(
+      '[MONGODB] Disconnected'
+    );
   }
 );
 
 /* =====================================================
-   START SERVER
+   SERVERLESS EXPORT
 ===================================================== */
-
-if (require.main === module) {
-  app.listen(
-    PORT,
-    () => {
-      console.log("");
-      console.log(
-        "========================================"
-      );
-      console.log(
-        "ABSher BACKEND STARTED"
-      );
-      console.log(
-        "PORT:",
-        PORT
-      );
-      console.log(
-        "========================================"
-      );
-    }
-  );
-}
 
 module.exports = app;
+
+/* =====================================================
+   LOCAL DEVELOPMENT
+===================================================== */
+
+if (
+  require.main === module
+) {
+
+  connectDB()
+
+    .then(
+      () => {
+
+        app.listen(
+          PORT,
+          '0.0.0.0',
+          () => {
+
+            console.log(
+              `[OK] Server running on http://0.0.0.0:${PORT}`
+            );
+
+            console.log(
+              `[OK] API: http://localhost:${PORT}`
+            );
+
+            console.log(
+              `[OK] /api/me ready`
+            );
+
+          }
+        );
+
+      }
+    )
+
+    .catch(
+      (err) => {
+
+        console.error(
+          '[DB ERROR] Connection failed:',
+          err.message
+        );
+
+        process.exit(
+          1
+        );
+      }
+    );
+}
