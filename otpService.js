@@ -1,16 +1,21 @@
-const crypto = require("crypto");
 
-/* =====================================================
-   OTP CONFIG
-===================================================== */
+const crypto = require('crypto');
 
 const SECRET =
   process.env.OTP_SECRET ||
-  "dev-otp-secret-change-me";
+  'dev-otp-secret-change-me';
 
-const DEFAULT_TTL_SECONDS = 300;
-const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_COOLDOWN_MS = 60000;
+/*
+  phone ->
+  {
+    otp,
+    hash,
+    expiresAt,
+    attempts,
+    maxAttempts,
+    lastSentAt
+  }
+*/
 
 const store = new Map();
 
@@ -18,21 +23,20 @@ const store = new Map();
    HMAC
 ===================================================== */
 
-function hmac(phone, otp, expiresAt) {
+function hmac(
+  phone,
+  otp,
+  expiresAt
+) {
   return crypto
-    .createHmac("sha256", SECRET)
-    .update(`${phone}:${otp}:${expiresAt}`)
-    .digest("hex");
-}
-
-/* =====================================================
-   GENERATE 6 DIGIT OTP
-===================================================== */
-
-function generateOtp() {
-  return String(
-    crypto.randomInt(0, 1000000)
-  ).padStart(6, "0");
+    .createHmac(
+      'sha256',
+      SECRET
+    )
+    .update(
+      `${phone}:${otp}:${expiresAt}`
+    )
+    .digest('hex');
 }
 
 /* =====================================================
@@ -41,95 +45,126 @@ function generateOtp() {
 
 function issueOtp(
   phone,
-  ttlSeconds = DEFAULT_TTL_SECONDS,
-  maxAttempts = DEFAULT_MAX_ATTEMPTS
+  ttlSeconds = 300,
+  maxAttempts = 3
 ) {
-  const cleanPhone = String(phone || "").trim();
-
-  if (!cleanPhone) {
-    throw new Error("Phone number is required to issue OTP");
-  }
-
-  const otp = generateOtp();
-  const now = Date.now();
+  /*
+    Generate exactly 4 digits.
+  */
+  const otp = String(
+    crypto.randomInt(
+      0,
+      10000
+    )
+  ).padStart(4, '0');
 
   const expiresAt =
-    now + Number(ttlSeconds) * 1000;
+    Date.now() +
+    ttlSeconds * 1000;
 
-  const hash = hmac(
-    cleanPhone,
-    otp,
-    expiresAt
+  const lastSentAt =
+    Date.now();
+
+  const hash =
+    hmac(
+      phone,
+      otp,
+      expiresAt
+    );
+
+  store.set(
+    phone,
+    {
+      /*
+        Temporary plain OTP is kept only
+        so we can debug the local OTP flow.
+      */
+      otp,
+
+      hash,
+
+      expiresAt,
+
+      attempts: 0,
+
+      maxAttempts,
+
+      lastSentAt,
+    }
   );
 
-  store.set(cleanPhone, {
-    otp,
-    hash,
-    expiresAt,
-    attempts: 0,
-    maxAttempts: Number(maxAttempts),
-    lastSentAt: now,
-  });
+  console.log('');
+  console.log(
+    '========================================'
+  );
+  console.log(
+    'OTP ISSUED'
+  );
+  console.log(
+    '========================================'
+  );
 
-  console.log("========================================");
-  console.log("OTP ISSUED");
-  console.log("PHONE:", cleanPhone);
-  console.log("OTP:", otp);
-  console.log("TTL:", `${ttlSeconds} seconds`);
-  console.log("EXPIRES:", new Date(expiresAt).toISOString());
-  console.log("MAX ATTEMPTS:", maxAttempts);
-  console.log("========================================");
+  console.log(
+    'PHONE:',
+    phone
+  );
+
+  console.log(
+    'OTP:',
+    otp
+  );
+
+  console.log(
+    'EXPIRES:',
+    new Date(
+      expiresAt
+    ).toISOString()
+  );
+
+  console.log(
+    'STORE SIZE:',
+    store.size
+  );
+
+  console.log(
+    '========================================'
+  );
 
   return otp;
 }
 
 /* =====================================================
-   GET OTP RECORD
-===================================================== */
-
-function getOtpRecord(phone) {
-  const cleanPhone = String(phone || "").trim();
-  return store.get(cleanPhone);
-}
-
-/* =====================================================
-   CAN RESEND OTP
+   CAN RESEND
 ===================================================== */
 
 function canResend(
   phone,
-  cooldownMs = DEFAULT_COOLDOWN_MS
+  cooldownMs = 60000
 ) {
-  const cleanPhone = String(phone || "").trim();
+  const rec =
+    store.get(phone);
 
-  if (!cleanPhone) {
-    return {
-      ok: false,
-      waitMs: 0,
-      reason: "invalid_phone",
-    };
-  }
-
-  const record = store.get(cleanPhone);
-
-  if (!record) {
+  /*
+    No previous OTP
+  */
+  if (!rec) {
     return {
       ok: true,
       waitMs: 0,
     };
   }
 
-  const elapsed =
-    Date.now() - record.lastSentAt;
-
   const waitMs =
-    Number(cooldownMs) - elapsed;
+    cooldownMs -
+    (
+      Date.now() -
+      rec.lastSentAt
+    );
 
   if (waitMs > 0) {
     return {
       ok: false,
       waitMs,
-      reason: "cooldown",
     };
   }
 
@@ -143,88 +178,215 @@ function canResend(
    VERIFY OTP
 ===================================================== */
 
-function verifyOtp(phone, receivedOtp) {
-  const cleanPhone = String(phone || "").trim();
-  const otp = String(receivedOtp || "").trim();
-
-  if (!/^\d{6}$/.test(otp)) {
-    return {
-      success: false,
-      message: "OTP must be exactly 6 digits",
-    };
-  }
-
-  const record = store.get(cleanPhone);
-
-  if (!record) {
-    return {
-      success: false,
-      message: "OTP not found or expired",
-    };
-  }
-
-  if (Date.now() > record.expiresAt) {
-    store.delete(cleanPhone);
-
-    return {
-      success: false,
-      message: "OTP has expired",
-    };
-  }
-
-  if (record.attempts >= record.maxAttempts) {
-    store.delete(cleanPhone);
-
-    return {
-      success: false,
-      message: "Maximum OTP attempts exceeded",
-    };
-  }
-
-  const receivedHash = hmac(
-    cleanPhone,
-    otp,
-    record.expiresAt
+function verifyOtp(
+  phone,
+  otp
+) {
+  console.log('');
+  console.log(
+    '========================================'
+  );
+  console.log(
+    'OTP SERVICE VERIFY'
+  );
+  console.log(
+    '========================================'
   );
 
-  const expectedHash = record.hash;
+  console.log(
+    'PHONE:',
+    phone
+  );
 
-  const receivedBuffer = Buffer.from(receivedHash, "hex");
-  const expectedBuffer = Buffer.from(expectedHash, "hex");
+  console.log(
+    'OTP RECEIVED:',
+    otp
+  );
 
-  const isValid =
-    receivedBuffer.length === expectedBuffer.length &&
-    crypto.timingSafeEqual(
-      receivedBuffer,
-      expectedBuffer
+  const rec =
+    store.get(phone);
+
+  /*
+    No OTP found
+  */
+  if (!rec) {
+    console.log(
+      '❌ NO OTP RECORD'
     );
 
-  if (!isValid) {
-    record.attempts += 1;
-
     return {
-      success: false,
-      message: "Invalid OTP",
-      attemptsLeft:
-        record.maxAttempts - record.attempts,
+      ok: false,
+      reason: 'no_otp',
     };
   }
 
-  store.delete(cleanPhone);
+  console.log(
+    'OTP STORED:',
+    rec.otp
+  );
+
+  console.log(
+    'ATTEMPTS:',
+    rec.attempts
+  );
+
+  console.log(
+    'MAX ATTEMPTS:',
+    rec.maxAttempts
+  );
+
+  console.log(
+    'EXPIRES:',
+    new Date(
+      rec.expiresAt
+    ).toISOString()
+  );
+
+  /*
+    Expired
+  */
+  if (
+    Date.now() >
+    rec.expiresAt
+  ) {
+    console.log(
+      '❌ OTP EXPIRED'
+    );
+
+    store.delete(phone);
+
+    return {
+      ok: false,
+      reason: 'expired',
+    };
+  }
+
+  /*
+    Too many attempts
+  */
+  if (
+    rec.attempts >=
+    rec.maxAttempts
+  ) {
+    console.log(
+      '❌ OTP LOCKED'
+    );
+
+    store.delete(phone);
+
+    return {
+      ok: false,
+      reason: 'locked',
+    };
+  }
+
+  /*
+    Normalize received OTP
+  */
+  const receivedOtp =
+    String(
+      otp || ''
+    )
+      .trim()
+      .replace(
+        /[^0-9]/g,
+        ''
+      );
+
+  /*
+    Compare directly first.
+
+    This makes the local OTP flow
+    reliable.
+  */
+  if (
+    receivedOtp !==
+    rec.otp
+  ) {
+    console.log(
+      '❌ OTP DOES NOT MATCH'
+    );
+
+    console.log(
+      'EXPECTED:',
+      rec.otp
+    );
+
+    console.log(
+      'RECEIVED:',
+      receivedOtp
+    );
+
+    rec.attempts += 1;
+
+    store.set(
+      phone,
+      rec
+    );
+
+    return {
+      ok: false,
+      reason: 'wrong',
+      attemptsLeft:
+        Math.max(
+          0,
+          rec.maxAttempts -
+            rec.attempts
+        ),
+    };
+  }
+
+  /*
+    HMAC verification as an additional
+    integrity check.
+  */
+  const expectedHash =
+    hmac(
+      phone,
+      rec.otp,
+      rec.expiresAt
+    );
+
+  if (
+    expectedHash !==
+    rec.hash
+  ) {
+    console.log(
+      '❌ HMAC CHECK FAILED'
+    );
+
+    store.delete(phone);
+
+    return {
+      ok: false,
+      reason: 'wrong',
+    };
+  }
+
+  /*
+    SUCCESS
+  */
+  console.log(
+    '✅ OTP MATCHED'
+  );
+
+  console.log(
+    '✅ OTP VERIFIED'
+  );
+
+  store.delete(phone);
+
+  console.log(
+    'OTP RECORD DELETED'
+  );
+
+  console.log(
+    '========================================'
+  );
 
   return {
-    success: true,
-    message: "OTP verified successfully",
+    ok: true,
   };
-}
-
-/* =====================================================
-   DELETE OTP
-===================================================== */
-
-function deleteOtp(phone) {
-  const cleanPhone = String(phone || "").trim();
-  store.delete(cleanPhone);
 }
 
 /* =====================================================
@@ -233,8 +395,6 @@ function deleteOtp(phone) {
 
 module.exports = {
   issueOtp,
-  verifyOtp,
   canResend,
-  deleteOtp,
-  getOtpRecord,
+  verifyOtp,
 };
