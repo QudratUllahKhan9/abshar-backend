@@ -1,1171 +1,1314 @@
+require("dotenv").config();
 
-import { useEffect, useMemo, useState } from "react";
-import "./App.css";
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const dns = require("dns");
 
-const API_BASE_URL =
-  "https://absher-deshboard-backend.vercel.app/api/items";
+const otpService = require("./otpService");
 
-const THEME_KEY = "peoplehub_theme";
+const app = express();
 
-const IMAGE_FIELDS = [
-  { key: "userImage", label: "Profile Photo", icon: "👤" },
-  { key: "cardImage", label: "ID Card", icon: "🪪" },
-  { key: "iqamaImage", label: "Iqama", icon: "📄" },
-  { key: "qrCode1", label: "QR Code 1", icon: "▦" },
+/* =====================================================
+   CONFIG
+===================================================== */
+
+const PORT = process.env.PORT || 4000;
+
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  "dev-jwt-secret-change-me";
+
+/* =====================================================
+   DNS
+===================================================== */
+
+dns.setServers([
+  "1.1.1.1",
+  "8.8.8.8",
+]);
+
+/* =====================================================
+   MIDDLEWARE
+===================================================== */
+
+app.use(
+  express.json({
+    limit: "10mb",
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "10mb",
+  })
+);
+
+/* =====================================================
+   CORS
+===================================================== */
+
+app.use((req, res, next) => {
+  res.header(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,DELETE,OPTIONS"
+  );
+
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+/* =====================================================
+   MONGODB
+===================================================== */
+
+const MONGODB_URI =
+  process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+  console.error(
+    "MONGODB_URI is missing from environment variables."
+  );
+}
+
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => {
+    console.log("MongoDB connected");
+  })
+  .catch((error) => {
+    console.error(
+      "MongoDB connection error:",
+      error
+    );
+  });
+
+/* =====================================================
+   ITEM MODEL
+===================================================== */
+
+const itemSchema = new mongoose.Schema(
   {
-    key: "drivingLicenseImage",
-    label: "Driving Licence",
-    icon: "🚘",
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+
+    idNo: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+
+    phone: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    password: {
+      type: String,
+      default: "",
+    },
+
+    /* =================================================
+       PASSPORT
+    ================================================= */
+
+    passportNo: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    passportType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    passportIssueDate: {
+      type: String,
+      default: "",
+    },
+
+    passportExpiryDate: {
+      type: String,
+      default: "",
+    },
+
+    passportPlaceOfIssue: {
+      type: String,
+      default: "",
+    },
+
+    passportStatus: {
+      type: String,
+      default: "",
+    },
+
+    /* =================================================
+       IQAMA
+    ================================================= */
+
+    idVersion: {
+      type: String,
+      default: "",
+    },
+
+    iqamaIssueDate: {
+      type: String,
+      default: "",
+    },
+
+    iqamaExpiryDate: {
+      type: String,
+      default: "",
+    },
+
+    /* =================================================
+       TRAVEL
+    ================================================= */
+
+    travelStatus: {
+      type: String,
+      default: "",
+    },
+
+    lastTravelDestination: {
+      type: String,
+      default: "",
+    },
+
+    lastTravelDate: {
+      type: String,
+      default: "",
+    },
+
+    balance: {
+      type: String,
+      default: "",
+    },
+
+    /* =================================================
+       IMAGES
+    ================================================= */
+
+    userImageUrl: {
+      type: String,
+      default: "",
+    },
+
+    cardImageUrl: {
+      type: String,
+      default: "",
+    },
+
+    iqamaImageUrl: {
+      type: String,
+      default: "",
+    },
+
+    qrCode1Url: {
+      type: String,
+      default: "",
+    },
+
+    drivingLicenseImageUrl: {
+      type: String,
+      default: "",
+    },
+
+    qrCode2Url: {
+      type: String,
+      default: "",
+    },
   },
-  { key: "qrCode2", label: "QR Code 2", icon: "▦" },
-];
+  {
+    timestamps: true,
+  }
+);
 
-const EMPTY_FORM = {
-  name: "",
-  idNo: "",
-  phone: "",
-  password: "",
+const Item =
+  mongoose.models.Item ||
+  mongoose.model("Item", itemSchema);
 
-  // Passport Information
-  passportNo: "PT4133313",
-  passportType: "Regular",
-  passportIssueDate: "20/02/2025",
-  passportExpiryDate: "21/02/2030",
-  passportPlaceOfIssue: "Pakistan",
-  passportStatus: "Valid",
+/* =====================================================
+   HEALTH
+===================================================== */
 
-  // Resident ID (Iqama) Details
-  idVersion: "2",
-  iqamaIssueDate: "21/09/2025",
-  iqamaExpiryDate: "22/07/2027",
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "Absher backend is running",
+    database:
+      mongoose.connection.readyState === 1
+        ? "connected"
+        : "disconnected",
+    time: new Date().toISOString(),
+  });
+});
 
-  // Travel Record & Status
-  travelStatus: "Inside the Kingdom",
-  lastTravelDestination: "Pakistan",
-  lastTravelDate: "12/08/2025",
-  balance: "0.00 SAR",
-};
+/* =====================================================
+   HELPER
+   SAFE USER RESPONSE
+===================================================== */
 
-function normalizeItem(item = {}) {
+function safeItem(item) {
+  if (!item) return null;
+
+  const object =
+    typeof item.toObject === "function"
+      ? item.toObject()
+      : item;
+
   return {
-    ...item,
-    id: String(item._id || item.id || ""),
+    id: String(
+      object._id ||
+      object.id ||
+      ""
+    ),
+
+    name: object.name || "",
+
+    idNo: object.idNo || "",
+
+    phone: object.phone || "",
+
+    /* ===============================================
+       PASSWORD NEVER RETURNED
+    =============================================== */
+
+    passportNo:
+      object.passportNo || "",
+
+    passportType:
+      object.passportType || "",
+
+    passportIssueDate:
+      object.passportIssueDate || "",
+
+    passportExpiryDate:
+      object.passportExpiryDate || "",
+
+    passportPlaceOfIssue:
+      object.passportPlaceOfIssue || "",
+
+    passportStatus:
+      object.passportStatus || "",
+
+    idVersion:
+      object.idVersion || "",
+
+    iqamaIssueDate:
+      object.iqamaIssueDate || "",
+
+    iqamaExpiryDate:
+      object.iqamaExpiryDate || "",
+
+    travelStatus:
+      object.travelStatus || "",
+
+    lastTravelDestination:
+      object.lastTravelDestination || "",
+
+    lastTravelDate:
+      object.lastTravelDate || "",
+
+    balance:
+      object.balance || "",
 
     userImageUrl:
-      item.userImageUrl || item.images?.userImage || "",
-    cardImageUrl:
-      item.cardImageUrl || item.images?.cardImage || "",
-    iqamaImageUrl:
-      item.iqamaImageUrl || item.images?.iqamaImage || "",
-    qrCode1Url:
-      item.qrCode1Url || item.images?.qrCode1 || "",
-    drivingLicenseImageUrl:
-      item.drivingLicenseImageUrl ||
-      item.images?.drivingLicenseImage ||
+      object.userImageUrl ||
+      object.images?.userImage ||
       "",
+
+    cardImageUrl:
+      object.cardImageUrl ||
+      object.images?.cardImage ||
+      "",
+
+    iqamaImageUrl:
+      object.iqamaImageUrl ||
+      object.images?.iqamaImage ||
+      "",
+
+    qrCode1Url:
+      object.qrCode1Url ||
+      object.images?.qrCode1 ||
+      "",
+
+    drivingLicenseImageUrl:
+      object.drivingLicenseImageUrl ||
+      object.images?.drivingLicenseImage ||
+      "",
+
     qrCode2Url:
-      item.qrCode2Url || item.images?.qrCode2 || "",
+      object.qrCode2Url ||
+      object.images?.qrCode2 ||
+      "",
 
     images: {
       userImage:
-        item.userImageUrl || item.images?.userImage || "",
-      cardImage:
-        item.cardImageUrl || item.images?.cardImage || "",
-      iqamaImage:
-        item.iqamaImageUrl || item.images?.iqamaImage || "",
-      qrCode1:
-        item.qrCode1Url || item.images?.qrCode1 || "",
-      drivingLicenseImage:
-        item.drivingLicenseImageUrl ||
-        item.images?.drivingLicenseImage ||
+        object.userImageUrl ||
+        object.images?.userImage ||
         "",
+
+      cardImage:
+        object.cardImageUrl ||
+        object.images?.cardImage ||
+        "",
+
+      iqamaImage:
+        object.iqamaImageUrl ||
+        object.images?.iqamaImage ||
+        "",
+
+      qrCode1:
+        object.qrCode1Url ||
+        object.images?.qrCode1 ||
+        "",
+
+      drivingLicenseImage:
+        object.drivingLicenseImageUrl ||
+        object.images?.drivingLicenseImage ||
+        "",
+
       qrCode2:
-        item.qrCode2Url || item.images?.qrCode2 || "",
+        object.qrCode2Url ||
+        object.images?.qrCode2 ||
+        "",
     },
   };
 }
 
-function extractItems(data) {
-  const candidates = [
-    data?.items,
-    data?.data?.items,
-    data?.data,
-    data?.results,
-  ];
+/* =====================================================
+   GET ALL ITEMS
+   DASHBOARD
+===================================================== */
 
-  return candidates.find(Array.isArray) || [];
-}
-
-function extractItem(data) {
-  return (
-    data?.item ||
-    data?.data?.item ||
-    data?.data?.record ||
-    data?.record ||
-    data?.data ||
-    data
-  );
-}
-
-async function readApiError(response) {
-  let data = {};
-
+app.get("/api/items", async (req, res) => {
   try {
-    data = await response.json();
-  } catch {
-    // Response may not contain JSON.
-  }
+    const items = await Item.find({})
+      .sort({
+        createdAt: -1,
+      })
+      .lean();
 
-  if (!response.ok || data.success === false) {
-    throw new Error(
-      data.message ||
-        data.error?.message ||
-        `Request failed (${response.status})`
+    res.json({
+      success: true,
+      items: items.map(safeItem),
+    });
+  } catch (error) {
+    console.error(
+      "GET ITEMS ERROR:",
+      error
     );
+
+    res.status(500).json({
+      success: false,
+      message: "Could not load records",
+    });
   }
+});
 
-  return data;
-}
+/* =====================================================
+   GET SINGLE ITEM
+===================================================== */
 
-export default function App() {
-  const [items, setItems] = useState([]);
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [images, setImages] = useState({});
-  const [imageFiles, setImageFiles] = useState({});
-  const [removedImages, setRemovedImages] = useState({});
-  const [originalImages, setOriginalImages] = useState({});
+app.get(
+  "/api/items/:id",
+  async (req, res) => {
+    try {
+      const item =
+        await Item.findById(
+          req.params.id
+        );
 
-  const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState(null);
-  const [query, setQuery] = useState("");
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message: "Record not found",
+        });
+      }
 
-  const [theme, setTheme] = useState(
-    () => localStorage.getItem(THEME_KEY) || "light"
+      res.json({
+        success: true,
+        item: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "GET SINGLE ITEM ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message: "Could not load record",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   FIND BY IQAMA
+===================================================== */
+
+app.get(
+  "/api/items/by-idno/:idNo",
+  async (req, res) => {
+    try {
+      const idNo = String(
+        req.params.idNo || ""
+      ).trim();
+
+      if (!idNo) {
+        return res.status(400).json({
+          success: false,
+          message: "Iqama number is required",
+        });
+      }
+
+      const item =
+        await Item.findOne({
+          idNo,
+        });
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "No record found for this Iqama number",
+        });
+      }
+
+      res.json({
+        success: true,
+        item: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "FIND BY IDNO ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message: "Server error",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   REQUEST OTP USING IQAMA
+===================================================== */
+
+app.post(
+  "/api/login-id",
+  async (req, res) => {
+    try {
+      const idNo = String(
+        req.body?.idNo || ""
+      ).trim();
+
+      if (!idNo) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Iqama number is required",
+        });
+      }
+
+      /* =============================================
+         FIND PERSON BY IQAMA
+      ============================================= */
+
+      const item =
+        await Item.findOne({
+          idNo,
+        });
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Iqama number not found",
+        });
+      }
+
+      /* =============================================
+         PHONE REQUIRED
+      ============================================= */
+
+      if (!item.phone) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No phone number is registered for this Iqama",
+        });
+      }
+
+      /* =============================================
+         RESEND COOLDOWN
+      ============================================= */
+
+      const resend =
+        otpService.canResend(
+          item.phone,
+          60000
+        );
+
+      if (!resend.ok) {
+        return res.status(429).json({
+          success: false,
+          message:
+            `Please wait ${Math.ceil(
+              resend.waitMs / 1000
+            )} seconds before requesting another OTP.`,
+          waitMs:
+            resend.waitMs,
+        });
+      }
+
+      /* =============================================
+         ISSUE OTP
+      ============================================= */
+
+      const otp =
+        otpService.issueOtp(
+          item.phone,
+          300,
+          3
+        );
+
+      console.log("");
+      console.log(
+        "LOGIN OTP REQUEST"
+      );
+      console.log(
+        "IQAMA:",
+        idNo
+      );
+      console.log(
+        "PHONE:",
+        item.phone
+      );
+      console.log(
+        "OTP:",
+        otp
+      );
+
+      return res.json({
+        success: true,
+
+        message:
+          "OTP sent successfully",
+
+        idNo,
+
+        /* =========================================
+           DEVELOPMENT ONLY
+        ========================================= */
+
+        ...(process.env.NODE_ENV !==
+          "production" && {
+          otp,
+        }),
+
+        /* Do not expose full phone */
+        phone:
+          maskPhone(item.phone),
+      });
+    } catch (error) {
+      console.error(
+        "LOGIN ID ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Could not send OTP",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   VERIFY IQAMA OTP
+===================================================== */
+
+app.post(
+  "/api/verify-id-otp",
+  async (req, res) => {
+    try {
+      const idNo = String(
+        req.body?.idNo || ""
+      ).trim();
+
+      const otp = String(
+        req.body?.otp || ""
+      )
+        .trim()
+        .replace(/[^0-9]/g, "");
+
+      if (!idNo) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Iqama number is required",
+        });
+      }
+
+      if (!otp) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "OTP is required",
+        });
+      }
+
+      /* =============================================
+         FIND PERSON
+      ============================================= */
+
+      const item =
+        await Item.findOne({
+          idNo,
+        });
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Iqama number not found",
+        });
+      }
+
+      /* =============================================
+         PHONE
+      ============================================= */
+
+      if (!item.phone) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Phone number not found",
+        });
+      }
+
+      /* =============================================
+         VERIFY OTP
+      ============================================= */
+
+      const result =
+        otpService.verifyOtp(
+          item.phone,
+          otp
+        );
+
+      if (!result.ok) {
+        let message =
+          "Invalid OTP";
+
+        if (
+          result.reason ===
+          "expired"
+        ) {
+          message =
+            "OTP has expired";
+        }
+
+        if (
+          result.reason ===
+          "locked"
+        ) {
+          message =
+            "Too many OTP attempts";
+        }
+
+        if (
+          result.reason ===
+          "no_otp"
+        ) {
+          message =
+            "No OTP found. Please request a new OTP";
+        }
+
+        return res.status(401).json({
+          success: false,
+          message,
+
+          reason:
+            result.reason,
+
+          attemptsLeft:
+            result.attemptsLeft,
+        });
+      }
+
+      /* =============================================
+         CREATE LOGIN TOKEN
+      ============================================= */
+
+      const token =
+        jwt.sign(
+          {
+            userId: String(
+              item._id
+            ),
+
+            idNo:
+              item.idNo,
+          },
+          JWT_SECRET,
+          {
+            expiresIn:
+              "7d",
+          }
+        );
+
+      /* =============================================
+         SUCCESS
+      ============================================= */
+
+      console.log("");
+      console.log(
+        "========================================"
+      );
+      console.log(
+        "IQAMA LOGIN SUCCESS"
+      );
+      console.log(
+        "NAME:",
+        item.name
+      );
+      console.log(
+        "IQAMA:",
+        item.idNo
+      );
+      console.log(
+        "PHONE:",
+        item.phone
+      );
+      console.log(
+        "========================================"
+      );
+
+      return res.json({
+        success: true,
+
+        message:
+          "Login successful",
+
+        token,
+
+        user: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "VERIFY ID OTP ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Could not verify OTP",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   CURRENT USER
+   GET /api/me
+===================================================== */
+
+app.get(
+  "/api/me",
+  async (req, res) => {
+    try {
+      const header =
+        req.headers.authorization ||
+        "";
+
+      if (!header.startsWith("Bearer ")) {
+        return res.status(401).json({
+          success: false,
+          message:
+            "Authentication token required",
+        });
+      }
+
+      const token =
+        header.substring(7);
+
+      const decoded =
+        jwt.verify(
+          token,
+          JWT_SECRET
+        );
+
+      const item =
+        await Item.findById(
+          decoded.userId
+        );
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "User record not found",
+        });
+      }
+
+      return res.json({
+        success: true,
+        user: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "ME ERROR:",
+        error
+      );
+
+      return res.status(401).json({
+        success: false,
+        message:
+          "Invalid or expired token",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   CREATE ITEM
+===================================================== */
+
+app.post(
+  "/api/items",
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+
+      if (
+        !body.name ||
+        !String(body.name).trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Name is required",
+        });
+      }
+
+      if (
+        !body.idNo ||
+        !String(body.idNo).trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Iqama number is required",
+        });
+      }
+
+      /* =============================================
+         CHECK DUPLICATE IQAMA
+      ============================================= */
+
+      const existing =
+        await Item.findOne({
+          idNo: String(
+            body.idNo
+          ).trim(),
+        });
+
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This Iqama number already exists",
+        });
+      }
+
+      /* =============================================
+         PASSWORD
+      ============================================= */
+
+      let password = "";
+
+      if (
+        body.password &&
+        String(
+          body.password
+        ).trim()
+      ) {
+        password =
+          await bcrypt.hash(
+            String(body.password),
+            10
+          );
+      }
+
+      const item =
+        new Item({
+          name:
+            String(body.name).trim(),
+
+          idNo:
+            String(body.idNo).trim(),
+
+          phone:
+            String(body.phone || "").trim(),
+
+          password,
+
+          passportNo:
+            body.passportNo || "",
+
+          passportType:
+            body.passportType || "",
+
+          passportIssueDate:
+            body.passportIssueDate || "",
+
+          passportExpiryDate:
+            body.passportExpiryDate || "",
+
+          passportPlaceOfIssue:
+            body.passportPlaceOfIssue || "",
+
+          passportStatus:
+            body.passportStatus || "",
+
+          idVersion:
+            body.idVersion || "",
+
+          iqamaIssueDate:
+            body.iqamaIssueDate || "",
+
+          iqamaExpiryDate:
+            body.iqamaExpiryDate || "",
+
+          travelStatus:
+            body.travelStatus || "",
+
+          lastTravelDestination:
+            body.lastTravelDestination || "",
+
+          lastTravelDate:
+            body.lastTravelDate || "",
+
+          balance:
+            body.balance || "",
+
+          userImageUrl:
+            body.userImageUrl || "",
+
+          cardImageUrl:
+            body.cardImageUrl || "",
+
+          iqamaImageUrl:
+            body.iqamaImageUrl || "",
+
+          qrCode1Url:
+            body.qrCode1Url || "",
+
+          drivingLicenseImageUrl:
+            body.drivingLicenseImageUrl || "",
+
+          qrCode2Url:
+            body.qrCode2Url || "",
+        });
+
+      await item.save();
+
+      return res.status(201).json({
+        success: true,
+        message:
+          "Record created successfully",
+        item: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "CREATE ITEM ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Could not create record",
+        error:
+          process.env.NODE_ENV !==
+          "production"
+            ? error.message
+            : undefined,
+      });
+    }
+  }
+);
+
+/* =====================================================
+   UPDATE ITEM
+===================================================== */
+
+app.put(
+  "/api/items/:id",
+  async (req, res) => {
+    try {
+      const item =
+        await Item.findById(
+          req.params.id
+        );
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Record not found",
+        });
+      }
+
+      const body =
+        req.body || {};
+
+      /* =============================================
+         UPDATE BASIC FIELDS
+      ============================================= */
+
+      const fields = [
+        "name",
+        "idNo",
+        "phone",
+
+        "passportNo",
+        "passportType",
+        "passportIssueDate",
+        "passportExpiryDate",
+        "passportPlaceOfIssue",
+        "passportStatus",
+
+        "idVersion",
+        "iqamaIssueDate",
+        "iqamaExpiryDate",
+
+        "travelStatus",
+        "lastTravelDestination",
+        "lastTravelDate",
+        "balance",
+
+        "userImageUrl",
+        "cardImageUrl",
+        "iqamaImageUrl",
+        "qrCode1Url",
+        "drivingLicenseImageUrl",
+        "qrCode2Url",
+      ];
+
+      for (const field of fields) {
+        if (
+          body[field] !==
+          undefined
+        ) {
+          item[field] =
+            body[field];
+        }
+      }
+
+      /* =============================================
+         PASSWORD UPDATE
+      ============================================= */
+
+      if (
+        body.password &&
+        String(
+          body.password
+        ).trim()
+      ) {
+        item.password =
+          await bcrypt.hash(
+            String(
+              body.password
+            ),
+            10
+          );
+      }
+
+      await item.save();
+
+      return res.json({
+        success: true,
+        message:
+          "Record updated successfully",
+        item: safeItem(item),
+      });
+    } catch (error) {
+      console.error(
+        "UPDATE ITEM ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Could not update record",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   DELETE ITEM
+===================================================== */
+
+app.delete(
+  "/api/items/:id",
+  async (req, res) => {
+    try {
+      const item =
+        await Item.findByIdAndDelete(
+          req.params.id
+        );
+
+      if (!item) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Record not found",
+        });
+      }
+
+      res.json({
+        success: true,
+        message:
+          "Record deleted successfully",
+      });
+    } catch (error) {
+      console.error(
+        "DELETE ITEM ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Could not delete record",
+      });
+    }
+  }
+);
+
+/* =====================================================
+   MASK PHONE
+===================================================== */
+
+function maskPhone(phone) {
+  const value = String(
+    phone || ""
   );
 
-  const [toast, setToast] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  // Load records from backend.
-  useEffect(() => {
-    let active = true;
-
-    async function loadItems() {
-      try {
-        const response = await fetch(API_BASE_URL);
-        const data = await readApiError(response);
-
-        if (active) {
-          setItems(extractItems(data).map(normalizeItem));
-        }
-      } catch (error) {
-        if (active) {
-          notify(`Could not load records: ${error.message}`);
-        }
-      } finally {
-        if (active) {
-          setLoading(false);
-        }
-      }
-    }
-
-    loadItems();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  // Theme preference.
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-
-  function notify(message) {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 3000);
+  if (value.length <= 4) {
+    return value;
   }
-
-  function resetForm() {
-    setForm(EMPTY_FORM);
-    setImages({});
-    setImageFiles({});
-    setRemovedImages({});
-    setOriginalImages({});
-    setEditingId(null);
-
-    const formElement = document.getElementById("record-form");
-    formElement?.reset();
-  }
-
-  function handleChange(event) {
-    const { name, value } = event.target;
-
-    setForm((previous) => ({
-      ...previous,
-      [name]: value,
-    }));
-  }
-
-  function handleImage(event, key) {
-    const file = event.target.files?.[0];
-
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      notify("Please select an image file.");
-      event.target.value = "";
-      return;
-    }
-
-    if (file.size > 1.5 * 1024 * 1024) {
-      notify("Please choose an image smaller than 1.5 MB.");
-      event.target.value = "";
-      return;
-    }
-
-    setImageFiles((previous) => ({
-      ...previous,
-      [key]: file,
-    }));
-
-    setRemovedImages((previous) => ({
-      ...previous,
-      [key]: false,
-    }));
-
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      setImages((previous) => ({
-        ...previous,
-        [key]: reader.result,
-      }));
-    };
-
-    reader.onerror = () => {
-      notify("Could not preview this image.");
-    };
-
-    reader.readAsDataURL(file);
-  }
-
-  function removeImage(key) {
-    setImages((previous) => {
-      const next = { ...previous };
-      delete next[key];
-      return next;
-    });
-
-    setImageFiles((previous) => {
-      const next = { ...previous };
-      delete next[key];
-      return next;
-    });
-
-    if (editingId && originalImages[key]) {
-      setRemovedImages((previous) => ({
-        ...previous,
-        [key]: true,
-      }));
-    }
-
-    const input = document.getElementById(`image-${key}`);
-
-    if (input) {
-      input.value = "";
-    }
-  }
-
-  // Create a new record or update an existing record.
-  async function handleSubmit(event) {
-    event.preventDefault();
-
-    if (!form.name.trim() || !form.idNo.trim()) {
-      notify("Please complete all required fields.");
-      return;
-    }
-
-    const totalImageBytes = Object.values(imageFiles).reduce(
-      (total, file) => total + (file?.size || 0),
-      0
-    );
-
-    if (totalImageBytes > 3.5 * 1024 * 1024) {
-      notify(
-        "Selected images total more than 3.5 MB. Upload fewer or smaller images."
-      );
-      return;
-    }
-
-    setSaving(true);
-
-    try {
-      const payload = new FormData();
-
-      Object.entries(form).forEach(([key, value]) => {
-        // Don't overwrite an existing password with a blank value.
-        if (
-          key === "password" &&
-          editingId &&
-          !String(value || "").trim()
-        ) {
-          return;
-        }
-
-        payload.append(key, String(value ?? ""));
-      });
-
-      Object.entries(imageFiles).forEach(([key, file]) => {
-        if (file) {
-          payload.append(key, file);
-        }
-      });
-
-      Object.entries(removedImages).forEach(([key, removed]) => {
-        if (removed) {
-          payload.append(`remove_${key}`, "true");
-        }
-      });
-
-      const response = await fetch(
-        editingId
-          ? `${API_BASE_URL}/${encodeURIComponent(editingId)}`
-          : API_BASE_URL,
-        {
-          method: editingId ? "PUT" : "POST",
-          body: payload,
-        }
-      );
-
-      const data = await readApiError(response);
-      const savedItem = normalizeItem(extractItem(data));
-
-      if (!savedItem.id) {
-        throw new Error(
-          "The API response did not include the saved record ID. Check the backend response format."
-        );
-      }
-
-      if (editingId) {
-        setItems((previous) =>
-          previous.map((item) =>
-            item.id === editingId ? savedItem : item
-          )
-        );
-
-        notify("Record updated successfully in database.");
-      } else {
-        setItems((previous) => [savedItem, ...previous]);
-
-        notify("Record saved successfully to database.");
-      }
-
-      resetForm();
-    } catch (error) {
-      notify(`Save failed: ${error.message}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Fill the form when editing.
-  function startEdit(item) {
-    setEditingId(item.id);
-    setOriginalImages(item.images || {});
-    setRemovedImages({});
-    setImageFiles({});
-
-    setForm({
-      name: item.name || "",
-      idNo: item.idNo || "",
-      phone: item.phone || "",
-      // Password is intentionally not returned by a secure backend.
-      password: "",
-      passportNo: item.passportNo || "",
-      passportType: item.passportType || "",
-      passportIssueDate: item.passportIssueDate || "",
-      passportExpiryDate: item.passportExpiryDate || "",
-      passportPlaceOfIssue: item.passportPlaceOfIssue || "",
-      passportStatus: item.passportStatus || "",
-      idVersion: item.idVersion || "",
-      iqamaIssueDate: item.iqamaIssueDate || "",
-      iqamaExpiryDate: item.iqamaExpiryDate || "",
-      travelStatus: item.travelStatus || "",
-      lastTravelDestination: item.lastTravelDestination || "",
-      lastTravelDate: item.lastTravelDate || "",
-      balance: item.balance || "",
-    });
-
-    setImages(item.images || {});
-
-    document.getElementById("form-section")?.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-    });
-  }
-
-  // Delete a record from the backend.
-  async function deleteRecord(item) {
-    const confirmed = window.confirm(
-      `Delete the record for "${item.name}" from the database?`
-    );
-
-    if (!confirmed) return;
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/${encodeURIComponent(item.id)}`,
-        { method: "DELETE" }
-      );
-
-      await readApiError(response);
-
-      setItems((previous) =>
-        previous.filter((record) => record.id !== item.id)
-      );
-
-      if (editingId === item.id) {
-        resetForm();
-      }
-
-      notify("Record deleted from database.");
-    } catch (error) {
-      notify(`Delete failed: ${error.message}`);
-    }
-  }
-
-  // Search records.
-  const filteredItems = useMemo(() => {
-    const term = query.trim().toLowerCase();
-
-    if (!term) return items;
-
-    return items.filter((item) =>
-      [
-        item.name,
-        item.idNo,
-        item.phone,
-        item.passportNo,
-      ].some((value) =>
-        String(value || "").toLowerCase().includes(term)
-      )
-    );
-  }, [items, query]);
-
-  const recordsWithImages = items.filter((item) =>
-    IMAGE_FIELDS.some((field) => item.images?.[field.key])
-  ).length;
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top">
-          <div className="brand-mark">PH</div>
-
-          <div className="brand-copy">
-            <strong>PeopleHub</strong>
-            <span>People directory</span>
-          </div>
-        </a>
-
-        <div className="top-actions">
-          <label className="search-box">
-            <span className="search-icon">⌕</span>
-
-            <input
-              type="search"
-              aria-label="Search records"
-              placeholder="Search name, ID or passport..."
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-
-          <button
-            className="icon-btn"
-            type="button"
-            onClick={() =>
-              setTheme((current) =>
-                current === "light" ? "dark" : "light"
-              )
-            }
-            aria-label="Toggle theme"
-            title="Toggle theme"
-          >
-            {theme === "light" ? "☾" : "☀"}
-          </button>
-        </div>
-      </header>
-
-      <main className="container" id="top">
-        <section className="hero">
-          <div className="hero-copy">
-            <span className="hero-tag">
-              <i />
-              YOUR PERSONAL DIRECTORY
-            </span>
-
-            <h1>
-              Every record.
-              <br />
-              <em>One simple place.</em>
-            </h1>
-
-            <p>
-              Manage personal info, Passport, Resident ID (Iqama),
-              and Travel status.
-            </p>
-
-            <a className="hero-link" href="#records">
-              Explore records <span>↓</span>
-            </a>
-          </div>
-
-          <div className="hero-art" aria-hidden="true">
-            <div className="orbit orbit-one" />
-            <div className="orbit orbit-two" />
-
-            <div className="art-card art-card-back">
-              <span className="art-document">▦</span>
-              <span>DOCUMENTS</span>
-            </div>
-
-            <div className="art-card art-card-front">
-              <div className="art-avatar">✦</div>
-
-              <div className="art-lines">
-                <b />
-                <b />
-                <b />
-              </div>
-
-              <span className="art-status">● YOUR DIRECTORY</span>
-            </div>
-
-            <div className="art-dot dot-one" />
-            <div className="art-dot dot-two" />
-          </div>
-
-          <div className="hero-bottom">
-            <span>PEOPLEHUB WORKSPACE</span>
-            <span>FRONTEND ONLY · NO LOGIN</span>
-          </div>
-        </section>
-
-        {/* Statistics */}
-        <section className="stats-grid">
-          <article className="stat-card">
-            <span className="stat-icon purple">▤</span>
-
-            <div>
-              <p>Total records</p>
-              <strong>{items.length}</strong>
-            </div>
-
-            <small>All saved records</small>
-          </article>
-
-          <article className="stat-card">
-            <span className="stat-icon mint">▧</span>
-
-            <div>
-              <p>With images</p>
-              <strong>{recordsWithImages}</strong>
-            </div>
-
-            <small>Records with photos</small>
-          </article>
-
-          <article className="stat-card">
-            <span className="stat-icon amber">⌕</span>
-
-            <div>
-              <p>Search results</p>
-              <strong>{filteredItems.length}</strong>
-            </div>
-
-            <small>Matching records</small>
-          </article>
-        </section>
-
-        {/* Record form */}
-        <section className="form-card" id="form-section">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">
-                {editingId ? "UPDATE RECORD" : "ADD TO DIRECTORY"}
-              </span>
-
-              <h2>
-                {editingId
-                  ? "Edit person record"
-                  : "Create a new record"}
-              </h2>
-
-              <p>
-                Enter all fields extracted from Absher details below.
-              </p>
-            </div>
-
-            {editingId && (
-              <button
-                className="secondary-btn"
-                type="button"
-                onClick={resetForm}
-              >
-                Cancel edit ×
-              </button>
-            )}
-          </div>
-
-          <form id="record-form" onSubmit={handleSubmit}>
-            {/* Section 1 */}
-            <div
-              className="upload-heading"
-              style={{
-                marginTop: 0,
-                borderTop: 0,
-                paddingTop: 0,
-              }}
-            >
-              <div>
-                <span className="eyebrow">SECTION 1</span>
-                <h3>Personal &amp; Contact Details</h3>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="field">
-                <span>
-                  Full Name <b>*</b>
-                </span>
-
-                <input
-                  name="name"
-                  value={form.name}
-                  onChange={handleChange}
-                  placeholder="Enter full name"
-                  maxLength={120}
-                  required
-                />
-              </label>
-
-              <label className="field">
-                <span>Phone Number</span>
-
-                <input
-                  type="tel"
-                  name="phone"
-                  value={form.phone}
-                  onChange={handleChange}
-                  placeholder="Enter phone number"
-                  maxLength={30}
-                />
-              </label>
-
-              <label className="field">
-                <span>Password</span>
-
-                <input
-                  type="password"
-                  name="password"
-                  value={form.password}
-                  onChange={handleChange}
-                  placeholder={
-                    editingId
-                      ? "Leave blank to keep existing password"
-                      : "Enter password"
-                  }
-                  maxLength={50}
-                  autoComplete="new-password"
-                />
-              </label>
-            </div>
-
-            {/* Section 2 */}
-            <div className="upload-heading">
-              <div>
-                <span className="eyebrow">SECTION 2</span>
-                <h3>Passport Information</h3>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="field">
-                <span>Passport Number</span>
-
-                <input
-                  name="passportNo"
-                  value={form.passportNo}
-                  onChange={handleChange}
-                  placeholder="Passport Number"
-                  maxLength={30}
-                />
-              </label>
-
-              <label className="field">
-                <span>Passport Type</span>
-
-                <input
-                  name="passportType"
-                  value={form.passportType}
-                  onChange={handleChange}
-                  placeholder="Regular"
-                  maxLength={30}
-                />
-              </label>
-
-              <label className="field">
-                <span>Passport Issue Date</span>
-
-                <input
-                  name="passportIssueDate"
-                  value={form.passportIssueDate}
-                  onChange={handleChange}
-                  placeholder="DD/MM/YYYY"
-                  maxLength={20}
-                />
-              </label>
-
-              <label className="field">
-                <span>Passport Expiry Date</span>
-
-                <input
-                  name="passportExpiryDate"
-                  value={form.passportExpiryDate}
-                  onChange={handleChange}
-                  placeholder="DD/MM/YYYY"
-                  maxLength={20}
-                />
-              </label>
-
-              <label className="field">
-                <span>Place of Issue</span>
-
-                <input
-                  name="passportPlaceOfIssue"
-                  value={form.passportPlaceOfIssue}
-                  onChange={handleChange}
-                  placeholder="Pakistan"
-                  maxLength={50}
-                />
-              </label>
-
-              <label className="field">
-                <span>Passport Status</span>
-
-                <input
-                  name="passportStatus"
-                  value={form.passportStatus}
-                  onChange={handleChange}
-                  placeholder="Valid"
-                  maxLength={30}
-                />
-              </label>
-            </div>
-
-            {/* Section 3 */}
-            <div className="upload-heading">
-              <div>
-                <span className="eyebrow">SECTION 3</span>
-                <h3>Resident ID (Iqama) Details</h3>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="field">
-                <span>
-                  Iqama Number <b>*</b>
-                </span>
-
-                <input
-                  name="idNo"
-                  value={form.idNo}
-                  onChange={handleChange}
-                  placeholder="Iqama Number"
-                  maxLength={80}
-                  required
-                />
-              </label>
-
-              <label className="field">
-                <span>ID Version</span>
-
-                <input
-                  name="idVersion"
-                  value={form.idVersion}
-                  onChange={handleChange}
-                  placeholder="2"
-                  maxLength={10}
-                />
-              </label>
-
-              <label className="field">
-                <span>Iqama Issue Date</span>
-
-                <input
-                  name="iqamaIssueDate"
-                  value={form.iqamaIssueDate}
-                  onChange={handleChange}
-                  placeholder="DD/MM/YYYY"
-                  maxLength={20}
-                />
-              </label>
-
-              <label className="field">
-                <span>Iqama Expiry Date</span>
-
-                <input
-                  name="iqamaExpiryDate"
-                  value={form.iqamaExpiryDate}
-                  onChange={handleChange}
-                  placeholder="DD/MM/YYYY"
-                  maxLength={20}
-                />
-              </label>
-            </div>
-
-            {/* Section 4 */}
-            <div className="upload-heading">
-              <div>
-                <span className="eyebrow">SECTION 4</span>
-                <h3>Travel Record &amp; Status</h3>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="field">
-                <span>Travel Status</span>
-
-                <input
-                  name="travelStatus"
-                  value={form.travelStatus}
-                  onChange={handleChange}
-                  placeholder="Inside the Kingdom"
-                  maxLength={50}
-                />
-              </label>
-
-              <label className="field">
-                <span>Last Travel Destination</span>
-
-                <input
-                  name="lastTravelDestination"
-                  value={form.lastTravelDestination}
-                  onChange={handleChange}
-                  placeholder="Pakistan"
-                  maxLength={50}
-                />
-              </label>
-
-              <label className="field">
-                <span>Last Travel Date</span>
-
-                <input
-                  name="lastTravelDate"
-                  value={form.lastTravelDate}
-                  onChange={handleChange}
-                  placeholder="DD/MM/YYYY"
-                  maxLength={20}
-                />
-              </label>
-
-              <label className="field">
-                <span>Operations Balance</span>
-
-                <input
-                  name="balance"
-                  value={form.balance}
-                  onChange={handleChange}
-                  placeholder="0.00 SAR"
-                  maxLength={30}
-                />
-              </label>
-            </div>
-
-            {/* Section 5: Images */}
-            <div className="upload-heading">
-              <div>
-                <span className="eyebrow">SECTION 5</span>
-                <h3>Photos &amp; Documents</h3>
-              </div>
-
-              <span className="file-limit">
-                JPG, PNG, WEBP · Max 1.5 MB each · Saved to Cloudinary
-              </span>
-            </div>
-
-            <div className="upload-grid">
-              {IMAGE_FIELDS.map((field) => (
-                <div className="upload-field" key={field.key}>
-                  <div className="upload-label">
-                    <span>{field.icon}</span>
-                    <b>{field.label}</b>
-                  </div>
-
-                  {images[field.key] ? (
-                    <div className="preview-card">
-                      <img
-                        src={images[field.key]}
-                        alt={`${field.label} preview`}
-                      />
-
-                      <button
-                        className="remove-image"
-                        type="button"
-                        onClick={() => removeImage(field.key)}
-                        aria-label={`Remove ${field.label}`}
-                      >
-                        ×
-                      </button>
-
-                      <label
-                        className="replace-link"
-                        htmlFor={`image-${field.key}`}
-                      >
-                        Replace image
-                      </label>
-
-                      <input
-                        className="hidden-file-input"
-                        id={`image-${field.key}`}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={(event) =>
-                          handleImage(event, field.key)
-                        }
-                      />
-                    </div>
-                  ) : (
-                    <label className="upload-drop">
-                      <input
-                        id={`image-${field.key}`}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={(event) =>
-                          handleImage(event, field.key)
-                        }
-                      />
-
-                      <span className="upload-plus">＋</span>
-                      <b>Upload {field.label.toLowerCase()}</b>
-                      <small>Choose an image from your device</small>
-                    </label>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            <div className="form-footer">
-              <span className="required-note">
-                <b>*</b> Required fields
-              </span>
-
-              <div className="footer-actions">
-                {editingId && (
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={resetForm}
-                  >
-                    Discard changes
-                  </button>
-                )}
-
-                <button
-                  className="primary-btn"
-                  type="submit"
-                  disabled={saving}
-                >
-                  {saving
-                    ? "Saving..."
-                    : editingId
-                    ? "Save changes →"
-                    : "Save record →"}
-                </button>
-              </div>
-            </div>
-          </form>
-        </section>
-
-        {/* Records list */}
-        <section className="records-section" id="records">
-          <div className="section-heading records-heading">
-            <div>
-              <span className="eyebrow">YOUR DIRECTORY</span>
-
-              <h2>
-                People records{" "}
-                <span className="count-pill">
-                  {filteredItems.length}
-                </span>
-              </h2>
-
-              <p>View, edit or remove your saved records.</p>
-            </div>
-
-            <button
-              className="secondary-btn"
-              type="button"
-              onClick={() => {
-                resetForm();
-
-                document
-                  .getElementById("form-section")
-                  ?.scrollIntoView({ behavior: "smooth" });
-              }}
-            >
-              ＋ Add record
-            </button>
-          </div>
-
-          {loading ? (
-            <div className="empty-state">
-              <h3>Loading records…</h3>
-              <p>Connecting to the Absher database.</p>
-            </div>
-          ) : filteredItems.length === 0 ? (
-            <div className="empty-state">
-              <div>⌕</div>
-
-              <h3>
-                {query
-                  ? "No matching records"
-                  : "Your directory is ready"}
-              </h3>
-
-              <p>
-                {query
-                  ? "Try another name, ID number or passport number."
-                  : "Add your first record using the form above."}
-              </p>
-            </div>
-          ) : (
-            <div className="records-grid">
-              {filteredItems.map((item) => (
-                <article className="person-card" key={item.id}>
-                  <div className="person-card-head">
-                    <div className="person-avatar">
-                      {item.images?.userImage ? (
-                        <img
-                          src={item.images.userImage}
-                          alt={item.name}
-                        />
-                      ) : (
-                        <span>
-                          {(item.name || "?")
-                            .trim()
-                            .charAt(0)
-                            .toUpperCase()}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="person-title">
-                      <h3>{item.name}</h3>
-                      <span className="record-id">
-                        Iqama · {item.idNo || "—"}
-                      </span>
-                    </div>
-
-                    <span className="local-chip">● Server</span>
-                  </div>
-
-                  <div className="person-meta">
-                    <div>
-                      <span>PHONE &amp; PASSWORD</span>
-
-                      <b>
-                        {item.phone || "—"} /{" "}
-                        {item.password ? "••••" : "—"}
-                      </b>
-                    </div>
-
-                    <div>
-                      <span>PASSPORT NO.</span>
-                      <b>{item.passportNo || "—"}</b>
-                    </div>
-                  </div>
-
-                  <div
-                    className="person-meta"
-                    style={{ marginTop: "8px" }}
-                  >
-                    <div>
-                      <span>IQAMA EXPIRY</span>
-                      <b>{item.iqamaExpiryDate || "—"}</b>
-                    </div>
-
-                    <div>
-                      <span>TRAVEL STATUS</span>
-                      <b>{item.travelStatus || "—"}</b>
-                    </div>
-                  </div>
-
-                  <div
-                    className="document-strip"
-                    style={{ marginTop: "15px" }}
-                  >
-                    {IMAGE_FIELDS.map((field) => (
-                      <div
-                        className={`document-thumb ${
-                          item.images?.[field.key] ? "has-image" : ""
-                        }`}
-                        key={field.key}
-                        title={field.label}
-                      >
-                        {item.images?.[field.key] ? (
-                          <img
-                            src={item.images[field.key]}
-                            alt={field.label}
-                          />
-                        ) : (
-                          <span>{field.icon}</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="person-actions">
-                    <button
-                      className="edit-action"
-                      type="button"
-                      onClick={() => startEdit(item)}
-                    >
-                      ✎ Edit record
-                    </button>
-
-                    <button
-                      className="delete-action"
-                      type="button"
-                      onClick={() => deleteRecord(item)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <footer className="page-footer">
-          <span>PEOPLEHUB · DATABASE EDITION</span>
-
-          <span>
-            Records are loaded and saved through the Absher backend API.
-          </span>
-        </footer>
-      </main>
-
-      {toast && (
-        <div className="toast" role="status">
-          <span>✓</span>
-          {toast}
-        </div>
-      )}
-    </div>
+    "*".repeat(
+      Math.max(
+        0,
+        value.length - 4
+      )
+    ) +
+    value.slice(-4)
   );
 }
+
+/* =====================================================
+   ROOT
+===================================================== */
+
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message:
+      "Absher Dashboard Backend API",
+  });
+});
+
+/* =====================================================
+   ERROR HANDLER
+===================================================== */
+
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "GLOBAL ERROR:",
+      error
+    );
+
+    if (
+      error.type ===
+      "entity.too.large"
+    ) {
+      return res.status(413).json({
+        success: false,
+        message:
+          "Payload too large",
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message:
+        "Internal server error",
+    });
+  }
+);
+
+/* =====================================================
+   START SERVER
+===================================================== */
+
+if (require.main === module) {
+  app.listen(
+    PORT,
+    () => {
+      console.log("");
+      console.log(
+        "========================================"
+      );
+      console.log(
+        "ABSher BACKEND STARTED"
+      );
+      console.log(
+        "PORT:",
+        PORT
+      );
+      console.log(
+        "========================================"
+      );
+    }
+  );
+}
+
+module.exports = app;
