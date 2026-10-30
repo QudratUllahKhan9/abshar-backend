@@ -1513,68 +1513,72 @@ app.get(
          SAFE USER DATA
       ========================================== */
 
-      const safeUser = {
+    
+const safeUser = {
+  id: String(user._id),
 
-        id:
-          String(
-            user._id
-          ),
+  // Basic information
+  name: user.name || '',
+  idNo: user.idNo || '',
+  phone: user.phone || '',
 
-        name:
-          user.name || '',
+  // Passport details
+  passportNo: user.passportNo || '',
+  passportType: user.passportType || '',
+  passportIssueDate: user.passportIssueDate || '',
+  passportExpiryDate: user.passportExpiryDate || '',
+  passportPlaceOfIssue: user.passportPlaceOfIssue || '',
+  passportStatus: user.passportStatus || '',
 
-        idNo:
-          user.idNo || '',
+  // ID details
+  idVersion: user.idVersion || '',
 
-        phone:
-          user.phone || '',
+  // Iqama details
+  iqamaIssueDate: user.iqamaIssueDate || '',
+  iqamaExpiryDate: user.iqamaExpiryDate || '',
 
-        /* Profile */
+  // Travel details
+  travelStatus: user.travelStatus || '',
+  lastTravelDestination: user.lastTravelDestination || '',
+  lastTravelDate: user.lastTravelDate || '',
 
-        userImageUrl:
-          user.userImageUrl || '',
+  // Balance
+  balance: user.balance || '0.00 SAR',
 
-        /* Iqama */
+  // Profile image
+  userImageUrl: user.userImageUrl || '',
+  userImagePublicId: user.userImagePublicId || '',
 
-        iqamaImageUrl:
-          user.iqamaImageUrl || '',
+  // Card image
+  cardImageUrl: user.cardImageUrl || '',
+  cardImagePublicId: user.cardImagePublicId || '',
 
-        /* QR Code 1 */
+  // Iqama image
+  iqamaImageUrl: user.iqamaImageUrl || '',
+  iqamaImagePublicId: user.iqamaImagePublicId || '',
 
-        qrCode1Url:
-          user.qrCode1Url || '',
+  // QR Code 1
+  qrCode1Url: user.qrCode1Url || '',
+  qrCode1PublicId: user.qrCode1PublicId || '',
 
-        /* Driving License */
+  // Driving License
+  drivingLicenseImageUrl: user.drivingLicenseImageUrl || '',
+  drivingLicenseImagePublicId: user.drivingLicenseImagePublicId || '',
 
-        drivingLicenseImageUrl:
-          user.drivingLicenseImageUrl || '',
+  // QR Code 2
+  qrCode2Url: user.qrCode2Url || '',
+  qrCode2PublicId: user.qrCode2PublicId || '',
 
-        /* QR Code 2 */
+  // Dates
+  createdAt: user.createdAt || null,
+  updatedAt: user.updatedAt || null,
+};
 
-        qrCode2Url:
-          user.qrCode2Url || '',
+return res.json({
+  success: true,
+  user: safeUser,
+});
 
-        /* Card */
-
-        cardImageUrl:
-          user.cardImageUrl || '',
-
-        /* Cloudinary IDs */
-
-        userImagePublicId:
-          user.userImagePublicId || '',
-
-        cardImagePublicId:
-          user.cardImagePublicId || '',
-
-        createdAt:
-          user.createdAt ||
-          null,
-
-        updatedAt:
-          user.updatedAt ||
-          null,
-      };
 
       /* ==========================================
          DATA SENT TO APP
